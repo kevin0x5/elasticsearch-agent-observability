@@ -23,6 +23,7 @@ TEXT_SUFFIXES = {
 IGNORE_DIR_NAMES = {
     ".git", ".codebuddy", "node_modules", "vendor", "dist", "build", "coverage", "__pycache__", ".idea", ".vscode",
 }
+INDEX_PREFIX_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._\-]{1,63}$")
 
 
 class SkillError(Exception):
@@ -97,6 +98,46 @@ def safe_relative(path: Path, base: Path | None = None) -> str:
         return str(path.relative_to(base))
     except ValueError:
         return str(path)
+
+
+def validate_workspace_dir(path: Path, label: str = "Workspace") -> Path:
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        raise SkillError(f"{label} not found: {resolved}")
+    if not resolved.is_dir():
+        raise SkillError(f"{label} must be a directory: {resolved}")
+    return resolved
+
+
+def validate_positive_int(value: int, label: str, *, minimum: int = 1, maximum: int | None = None) -> int:
+    if value < minimum:
+        raise SkillError(f"{label} must be >= {minimum}, got: {value}")
+    if maximum is not None and value > maximum:
+        raise SkillError(f"{label} must be <= {maximum}, got: {value}")
+    return value
+
+
+def validate_index_prefix(value: str) -> str:
+    prefix = value.strip().lower()
+    if not INDEX_PREFIX_PATTERN.fullmatch(prefix):
+        raise SkillError(
+            "Index prefix must start with a lowercase letter or digit and contain only lowercase letters, digits, '.', '_' or '-'."
+        )
+    return prefix
+
+
+def validate_credential_pair(user: str | None, password: str | None) -> tuple[str, str] | None:
+    normalized_user = (user or "").strip()
+    normalized_password = (password or "").strip()
+    if bool(normalized_user) ^ bool(normalized_password):
+        raise SkillError("--es-user and --es-password must be provided together")
+    if not normalized_user:
+        return None
+    return normalized_user, normalized_password
+
+
+def build_events_alias(index_prefix: str) -> str:
+    return f"{index_prefix}-events"
 
 
 def iter_text_files(workspace: Path, max_files: int = 400, max_bytes: int = 200_000) -> list[Path]:

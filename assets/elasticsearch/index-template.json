@@ -1,5 +1,5 @@
 {
-  "index_patterns": ["agent-obsv-*-*"],
+  "index_patterns": ["agent-obsv-events-*"],
   "priority": 200,
   "template": {
     "settings": {
@@ -37,6 +37,7 @@
     }
   },
   "_meta": {
-    "product": "elasticsearch-agent-observability"
+    "product": "elasticsearch-agent-observability",
+    "recommended_modules": []
   }
 }

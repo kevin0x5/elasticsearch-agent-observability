@@ -4,9 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from common import SkillError, print_error, read_json, write_text
+from common import (
+    SkillError,
+    build_events_alias,
+    print_error,
+    read_json,
+    validate_credential_pair,
+    validate_index_prefix,
+    write_text,
+)
+
+
+DEFAULT_ES_USER_ENV = "ELASTICSEARCH_USERNAME"
+DEFAULT_ES_PASSWORD_ENV = "ELASTICSEARCH_PASSWORD"
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,7 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--index-prefix", default="agent-obsv")
     parser.add_argument("--environment", default="dev")
     parser.add_argument("--service-name", default="agent-runtime")
+    parser.add_argument("--embed-es-credentials", action="store_true", help="Embed Elasticsearch credentials into the generated YAML")
     return parser.parse_args()
+
+
+def _yaml_scalar(value: str) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def render_config(
@@ -31,18 +49,21 @@ def render_config(
     service_name: str,
     es_user: str = "",
     es_password: str = "",
+    embed_credentials: bool = False,
 ) -> str:
-    modules = ",".join(module["module_kind"] for module in discovery.get("detected_modules", [])[:12])
+    validated_prefix = validate_index_prefix(index_prefix)
+    credentials = validate_credential_pair(es_user, es_password)
+    modules = ",".join(module["module_kind"] for module in discovery.get("detected_modules", [])[:12]) or "unknown"
     resource_actions = "\n".join(
         [
             "      - key: service.name",
-            f"        value: {service_name}",
+            f"        value: {_yaml_scalar(service_name)}",
             "        action: upsert",
             "      - key: deployment.environment",
-            f"        value: {environment}",
+            f"        value: {_yaml_scalar(environment)}",
             "        action: upsert",
             "      - key: agent.discovery.modules",
-            f"        value: {modules or 'unknown'}",
+            f"        value: {_yaml_scalar(modules)}",
             "        action: upsert",
             "      - key: observer.product",
             "        value: elasticsearch-agent-observability",
@@ -50,12 +71,19 @@ def render_config(
         ]
     )
 
-    # Build auth block for elasticsearch exporter
     auth_lines = ""
-    if es_user and es_password:
-        auth_lines = f"""
-    user: "{es_user}"
-    password: "{es_password}" """
+    if credentials:
+        if embed_credentials:
+            auth_lines = (
+                f"\n    user: {_yaml_scalar(credentials[0])}"
+                f"\n    password: {_yaml_scalar(credentials[1])}"
+            )
+        else:
+            auth_lines = (
+                f"\n    user: {_yaml_scalar(f'${{env:{DEFAULT_ES_USER_ENV}}}') }"
+                f"\n    password: {_yaml_scalar(f'${{env:{DEFAULT_ES_PASSWORD_ENV}}}') }"
+            )
+    events_alias = build_events_alias(validated_prefix)
 
     return f"""receivers:
   otlp:
@@ -84,9 +112,9 @@ processors:
 
 exporters:
   elasticsearch:
-    endpoints: ["{es_url}"]{auth_lines}
-    logs_index: {index_prefix}-events-default
-    traces_index: {index_prefix}-spans-default
+    endpoints: [{_yaml_scalar(es_url)}]{auth_lines}
+    logs_index: {_yaml_scalar(events_alias)}
+    traces_index: {_yaml_scalar(events_alias)}
 
 service:
   pipelines:
@@ -114,6 +142,7 @@ def main() -> int:
             service_name=args.service_name,
             es_user=args.es_user,
             es_password=args.es_password,
+            embed_credentials=args.embed_es_credentials,
         )
         write_text(output, rendered)
         print(f"✅ collector config written: {output}")

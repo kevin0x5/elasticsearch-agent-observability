@@ -4,11 +4,21 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any
 
-from common import ESConfig, SkillError, es_request, print_error, read_json, write_json, write_text
+from common import (
+    ESConfig,
+    SkillError,
+    build_events_alias,
+    es_request,
+    print_error,
+    read_json,
+    validate_credential_pair,
+    validate_index_prefix,
+    write_json,
+    write_text,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +96,7 @@ def render_markdown(report: dict, config: dict) -> str:
             "# Agent Observability Report",
             "",
             f"- time_range: `{config.get('time_range', '24h')}`",
+            f"- query_target: `{config.get('events_alias') or build_events_alias(config.get('index_prefix', 'agent-obsv'))}`",
             f"- documents: `{report['documents']}`",
             f"- success_rate: `{report['success_rate']}`",
             f"- tool_error_rate: `{report['tool_error_rate']}`",
@@ -116,17 +127,25 @@ def main() -> int:
     try:
         args = parse_args()
         config = read_json(Path(args.config).expanduser().resolve())
-        es_config = ESConfig(es_url=args.es_url, es_user=args.es_user, es_password=args.es_password)
-        index_prefix = config.get("index_prefix", "agent-obsv")
+        if not isinstance(config, dict):
+            raise SkillError("Report config must be a JSON object")
+        credentials = validate_credential_pair(args.es_user, args.es_password)
+        index_prefix = validate_index_prefix(config.get("index_prefix", "agent-obsv"))
+        events_alias = str(config.get("events_alias") or build_events_alias(index_prefix)).strip()
         time_range = args.time_range if args.time_range != "now-24h" else config.get("time_range", "now-24h")
-        result = es_request(es_config, "POST", f"/{index_prefix}-*/_search", search_payload(time_range))
+        es_config = ESConfig(
+            es_url=args.es_url,
+            es_user=credentials[0] if credentials else None,
+            es_password=credentials[1] if credentials else None,
+        )
+        result = es_request(es_config, "POST", f"/{events_alias}/_search", search_payload(time_range))
         report = build_report(result)
         output = Path(args.output).expanduser().resolve()
         output_format = args.format or ("json" if output.suffix.lower() == ".json" else "markdown")
         if output_format == "json":
             write_json(output, report)
         else:
-            write_text(output, render_markdown(report, {**config, "time_range": time_range}))
+            write_text(output, render_markdown(report, {**config, "time_range": time_range, "events_alias": events_alias}))
         print(f"✅ report written: {output}")
         return 0
     except SkillError as exc:

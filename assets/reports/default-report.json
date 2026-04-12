@@ -1,6 +1,7 @@
 {
   "time_range": "now-24h",
   "index_prefix": "agent-obsv",
+  "events_alias": "agent-obsv-events",
   "recommended_modules": [],
   "metrics": [
     "success_rate",

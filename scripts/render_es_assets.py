@@ -6,7 +6,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from common import SkillError, ensure_dir, print_error, read_json, write_json
+from common import (
+    SkillError,
+    build_events_alias,
+    ensure_dir,
+    print_error,
+    read_json,
+    validate_index_prefix,
+    validate_positive_int,
+    write_json,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,16 +27,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_index_template(index_prefix: str, modules: list[str], retention_days: int) -> dict:
+def build_index_template(index_prefix: str, modules: list[str]) -> dict:
+    events_alias = build_events_alias(index_prefix)
     return {
-        "index_patterns": [f"{index_prefix}-*-*"],
+        "index_patterns": [f"{events_alias}-*"],
         "priority": 200,
         "template": {
             "settings": {
                 "number_of_shards": 1,
                 "index.default_pipeline": f"{index_prefix}-normalize",
                 "index.lifecycle.name": f"{index_prefix}-lifecycle",
-                "index.lifecycle.rollover_alias": f"{index_prefix}-events",
+                "index.lifecycle.rollover_alias": events_alias,
             },
             "mappings": {
                 "dynamic": True,
@@ -64,7 +74,7 @@ def build_index_template(index_prefix: str, modules: list[str], retention_days: 
     }
 
 
-def build_ingest_pipeline(index_prefix: str, modules: list[str]) -> dict:
+def build_ingest_pipeline(modules: list[str]) -> dict:
     return {
         "description": "Normalize agent observability events and apply light redaction",
         "processors": [
@@ -102,10 +112,12 @@ def build_ilm_policy(retention_days: int) -> dict:
 
 
 def build_report_config(index_prefix: str, discovery: dict) -> dict:
+    modules = sorted({module["module_kind"] for module in discovery.get("detected_modules", [])})
     return {
         "time_range": "now-24h",
         "index_prefix": index_prefix,
-        "recommended_modules": [module["module_kind"] for module in discovery.get("detected_modules", [])],
+        "events_alias": build_events_alias(index_prefix),
+        "recommended_modules": modules,
         "metrics": [
             "success_rate",
             "p50_latency_ms",
@@ -123,11 +135,13 @@ def build_report_config(index_prefix: str, discovery: dict) -> dict:
 
 def render_assets(discovery: dict, output_dir: Path, *, index_prefix: str, retention_days: int) -> dict:
     ensure_dir(output_dir)
-    modules = [module["module_kind"] for module in discovery.get("detected_modules", [])]
-    index_template = build_index_template(index_prefix, modules, retention_days)
-    ingest_pipeline = build_ingest_pipeline(index_prefix, modules)
-    ilm_policy = build_ilm_policy(retention_days)
-    report_config = build_report_config(index_prefix, discovery)
+    validated_prefix = validate_index_prefix(index_prefix)
+    validated_retention_days = validate_positive_int(retention_days, "Retention days")
+    modules = sorted({module["module_kind"] for module in discovery.get("detected_modules", [])})
+    index_template = build_index_template(validated_prefix, modules)
+    ingest_pipeline = build_ingest_pipeline(modules)
+    ilm_policy = build_ilm_policy(validated_retention_days)
+    report_config = build_report_config(validated_prefix, discovery)
     paths = {
         "index_template": output_dir / "index-template.json",
         "ingest_pipeline": output_dir / "ingest-pipeline.json",

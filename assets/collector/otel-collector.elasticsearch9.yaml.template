@@ -37,10 +37,10 @@ processors:
 exporters:
   elasticsearch:
     endpoints: ["${ES_URL}"]
-    # user: "${ES_USER}"
-    # password: "${ES_PASSWORD}"
-    logs_index: "${INDEX_PREFIX}-events-default"
-    traces_index: "${INDEX_PREFIX}-spans-default"
+    # user: "${env:ELASTICSEARCH_USERNAME}"
+    # password: "${env:ELASTICSEARCH_PASSWORD}"
+    logs_index: "${INDEX_PREFIX}-events"
+    traces_index: "${INDEX_PREFIX}-events"
 
 service:
   pipelines:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from common import (
@@ -15,7 +16,10 @@ from common import (
     validate_index_prefix,
     validate_positive_int,
     write_json,
+    write_text,
 )
+
+DEFAULT_KIBANA_COLUMNS = ["agent_id", "run_id", "tool_name", "model_name", "latency_ms", "error_type"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,13 +115,69 @@ def build_ilm_policy(retention_days: int) -> dict:
     }
 
 
+def build_kibana_saved_objects(index_prefix: str) -> dict:
+    events_alias = build_events_alias(index_prefix)
+    data_view_id = f"{index_prefix}-events-view"
+    saved_search_id = f"{index_prefix}-event-stream"
+    search_source = {
+        "indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index",
+        "query": {"language": "kuery", "query": ""},
+        "filter": [],
+    }
+    objects = [
+        {
+            "type": "index-pattern",
+            "id": data_view_id,
+            "attributes": {
+                "title": f"{events_alias}*",
+                "name": "Agent observability events",
+                "timeFieldName": "captured_at",
+            },
+        },
+        {
+            "type": "search",
+            "id": saved_search_id,
+            "attributes": {
+                "title": "Agent observability event stream",
+                "description": "Default Kibana Discover surface for agent observability events.",
+                "columns": DEFAULT_KIBANA_COLUMNS,
+                "sort": [["captured_at", "desc"]],
+                "grid": {},
+                "hideChart": False,
+                "kibanaSavedObjectMeta": {
+                    "searchSourceJSON": json.dumps(search_source, separators=(",", ":")),
+                },
+            },
+            "references": [
+                {
+                    "id": data_view_id,
+                    "name": "kibanaSavedObjectMeta.searchSourceJSON.index",
+                    "type": "index-pattern",
+                }
+            ],
+        },
+    ]
+    return {
+        "space": "default",
+        "objects": objects,
+        "summary": {
+            "data_view_id": data_view_id,
+            "saved_search_id": saved_search_id,
+            "events_alias_pattern": f"{events_alias}*",
+        },
+    }
+
+
 def build_report_config(index_prefix: str, discovery: dict) -> dict:
     modules = sorted({module["module_kind"] for module in discovery.get("detected_modules", [])})
+    kibana_bundle = build_kibana_saved_objects(index_prefix)
     return {
         "time_range": "now-24h",
         "index_prefix": index_prefix,
         "events_alias": build_events_alias(index_prefix),
         "recommended_modules": modules,
+        "human_surface": "kibana",
+        "kibana": kibana_bundle["summary"],
         "metrics": [
             "success_rate",
             "p50_latency_ms",
@@ -141,17 +201,25 @@ def render_assets(discovery: dict, output_dir: Path, *, index_prefix: str, reten
     index_template = build_index_template(validated_prefix, modules)
     ingest_pipeline = build_ingest_pipeline(modules)
     ilm_policy = build_ilm_policy(validated_retention_days)
+    kibana_saved_objects = build_kibana_saved_objects(validated_prefix)
     report_config = build_report_config(validated_prefix, discovery)
     paths = {
         "index_template": output_dir / "index-template.json",
         "ingest_pipeline": output_dir / "ingest-pipeline.json",
         "ilm_policy": output_dir / "ilm-policy.json",
         "report_config": output_dir / "report-config.json",
+        "kibana_saved_objects_json": output_dir / "kibana-saved-objects.json",
+        "kibana_saved_objects_ndjson": output_dir / "kibana-saved-objects.ndjson",
     }
     write_json(paths["index_template"], index_template)
     write_json(paths["ingest_pipeline"], ingest_pipeline)
     write_json(paths["ilm_policy"], ilm_policy)
     write_json(paths["report_config"], report_config)
+    write_json(paths["kibana_saved_objects_json"], kibana_saved_objects)
+    write_text(
+        paths["kibana_saved_objects_ndjson"],
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in kibana_saved_objects["objects"]) + "\n",
+    )
     return {key: str(path) for key, path in paths.items()}
 
 

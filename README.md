@@ -1,81 +1,87 @@
 # elasticsearch-agent-observability
 
-> 给一个 agent 项目快速搭起可观测底座：先看懂结构，再生成配置、应用 ES 资产、初始化写索引，并直接产出第一份报表。
+> 基于 **Elasticsearch + OpenTelemetry + Kibana**，为当前 agent 或指定 agent 自动构建采集、解析、存储、生命周期管理和报表入口的可观测能力。
 
-## 这个项目是干什么的
+## 这个项目真正要解决什么
 
-很多 agent 项目不是不需要 observability，而是第一步太容易卡住。
+这个项目不应该只是“帮你生成几份 YAML / JSON”。
 
-你明明知道迟早要看这些东西：
+它要解决的是更完整的一件事：
 
-- 调用次数
-- 耗时分布
-- 错误类型
-- token 和成本
-- 哪些 tool 最容易出问题
+- 识别当前 agent / 某个指定 agent 的结构
+- 生成适合这个 agent 的 OTel 采集入口
+- 在 Elasticsearch 里准备好模板、pipeline、生命周期和写索引
+- 给 Kibana 准备好可直接导入 / 应用的报表资产
+- 让你能尽快把“采集 -> 入库 -> 查询 -> 看板”这条链路跑起来
 
-但真要开始做时，问题马上变成一串碎活：Collector 怎么配、索引模板怎么建、生命周期怎么设、首个写索引怎么起、报表要查什么。
+所以它的产品定义应该是：
+**用 Elasticsearch 原生能力把 agent observability 做起来**，而不是拿 Markdown 报表去假装一个平台。
 
-`elasticsearch-agent-observability` 做的不是完整平台，而是把最难开始的那几步一次性搭起来：
-**先看你的项目结构，再替你生成配置、应用 ES 资产、初始化写索引，并直接产出第一份报表。**
+## 核心使用场景
 
-## 你会在什么场景用它
+### 场景 1：给当前 agent 快速补齐可观测能力
 
-- 你已经有一个 agent 或 skill 项目，但出了问题时很难知道卡在哪
-- 你准备把运行数据接到 Elasticsearch 9.x
-- 你不想从零手写一堆 Collector YAML、模板、生命周期和查询配置
-- 你希望第一次就把“生成 -> apply -> 查报表”这一条链路跑通
+比如你正在做一个 agent 项目，已经开始遇到这些问题：
 
-## 你真正会得到什么
+- 到底跑了多少次
+- 哪些 tool 老出错
+- 哪些模型最贵
+- latency 卡在哪
+- retry / timeout 是不是在变多
 
-跑完之后，你会拿到一套可继续修改、也可以立即落地的产物：
+你不想自己从零写：
 
-- 一份项目结构识别结果，知道它看懂了什么
-- 一份 Collector 配置草稿，知道数据准备怎么采
-- 一套 Elasticsearch 资产，知道数据准备怎么落
-- 一份 apply 结果，知道模板、pipeline、ILM 和写索引是否已经进集群
-- 一份运行脚本和 agent 环境变量模板，知道 Collector 和 agent 该怎么接起来
-- 一份报表配置和第一份报表，知道查询链路已经通没通
-- 一份摘要说明，知道哪里靠谱、哪里要小心
+- Collector 配置
+- Elasticsearch 模板
+- ingest pipeline
+- ILM
+- Kibana 报表入口
 
-这就是它的价值：
-**不是只替你生成文件，而是替你把可观测闭环真正推到“能验证”的状态。**
+这时候这个 skill 的工作就是：
+**自动给这个 agent 搭出一套能跑起来、也能继续扩的 observability 底座。**
 
-## 3 分钟跑通
+### 场景 2：按用户需求，为某个指定 agent 构建观测面
 
-第一次上手，先别研究术语，先直接跑完整 happy path。
+比如用户说：
+
+- “给这个 agent 接 Elasticsearch 可观测”
+- “给订单分析 agent 做可观测和 Kibana 报表”
+- “我想看它的 tool error、latency、token、cost”
+
+那这个 skill 不应该停在“给你几份文件”。
+它应该尽量把以下几个面都准备出来：
+
+- 自动采集入口
+- 自动解析 / 归一化入口
+- 自动存储落点
+- 自动生命周期策略
+- 自动 Kibana 人类报表面
+
+## 现在这版主路径是什么
 
 ```bash
 python scripts/bootstrap_observability.py \
   --workspace /path/to/your-agent \
   --output-dir generated/bootstrap \
   --es-url http://localhost:9200 \
-  --apply-es-assets
+  --apply-es-assets \
+  --kibana-url http://localhost:5601 \
+  --apply-kibana-assets
 ```
 
-你只需要替换两处：
+这条命令会把几件事一口气串起来：
 
-- `/path/to/your-agent`：你的 agent 项目目录
-- `http://localhost:9200`：你的 Elasticsearch 地址
+- 扫描 workspace，识别可监测模块
+- 生成 OTel Collector 配置
+- 生成 agent OTLP 环境模板和 Collector 启动脚本
+- 生成 Elasticsearch 资产
+- 把 ES 资产 apply 到目标集群
+- 初始化首个写索引
+- 生成 Kibana saved objects
+- 可选把 Kibana 资产直接 apply 到 Kibana
+- 额外生成一份 smoke 报表，方便先验证链路
 
-这个命令**不会修改你的 agent 源码**，但会在你显式加 `--apply-es-assets` 时把生成出来的 Elasticsearch 资产真正推到目标集群。
-
-## 第一次跑完，先看什么
-
-优先看这三个文件：
-
-- `generated/bootstrap/bootstrap-summary.md`
-- `generated/bootstrap/discovery.json`
-- `generated/bootstrap/report.md`
-
-第一次使用时，不要先追求“监控体系是不是完整”，先看两件事：
-
-- **它有没有基本看懂你的项目**
-- **报表链路有没有真的跑通**
-
-如果它识别出了主要模块，并且已经能产出第一份报表，这一步就已经从“做一半”跨到了“可以验证”。
-
-## 你会看到哪些产物
+## 产物不只是配置文件
 
 ```text
 generated/bootstrap/
@@ -89,111 +95,85 @@ generated/bootstrap/
 │   ├── ingest-pipeline.json
 │   ├── ilm-policy.json
 │   ├── report-config.json
+│   ├── kibana-saved-objects.json
+│   ├── kibana-saved-objects.ndjson
 │   └── apply-summary.json
 └── bootstrap-summary.md
 ```
 
-可以把它们理解成：
+这些文件各自的角色是：
 
-- `discovery.json`：它觉得你的项目里有哪些关键模块
-- `otel-collector.generated.yaml`：数据准备怎么采
-- `run-collector.sh`：Collector 怎么直接启动
-- `agent-otel.env`：agent 进程该带哪些 OTLP 环境变量
-- `index-template.json`：数据准备怎么存
-- `ingest-pipeline.json`：入库前做哪些清洗
-- `ilm-policy.json`：数据保留多久、什么时候滚动
-- `report-config.json`：报表准备怎么查
-- `apply-summary.json`：ES 资产是否已经真正推到集群
-- `report.md`：当前查询链路是否能跑出第一份结果
-- `bootstrap-summary.md`：给人看的结果摘要和告警
+- `discovery.json`：它觉得这个 agent 有哪些值得观测的模块
+- `otel-collector.generated.yaml`：采集 / 转发入口
+- `run-collector.sh`：Collector 启动脚本
+- `agent-otel.env`：agent 运行时 OTLP 环境模板
+- `index-template.json`：ES 存储结构
+- `ingest-pipeline.json`：ES 入库解析 / 轻量清洗
+- `ilm-policy.json`：生命周期管理
+- `kibana-saved-objects.*`：Kibana 报表入口资产
+- `apply-summary.json`：这轮到底有没有真正 apply 到 ES / Kibana
+- `report.md`：一份 smoke 报表，用来先验证查询链路
 
-## 如果第一次结果不对，通常先查什么
+## 报表面怎么理解
 
-优先看 `bootstrap-summary.md` 的提示，常见情况有这些：
+这里的主报表面应该是 **Kibana**。
 
-- `Discovery reached the --max-files limit`：项目太大，可能没扫全
-- `No monitorable modules were detected`：路径不对，或者当前启发式没有识别出来
-- `credentials were not written to disk`：不是报错，是在提醒你当前采用了更安全的默认模式
-- 如果你显式使用了 `--embed-es-credentials`：把生成的 YAML 当成敏感文件处理
-- 如果 `report.md` 还是空的：先看 Collector 是否启动，以及 agent 是否真的把 OTLP 数据发出来了
+`report.md` / JSON 不是产品主叙事，它只是一个很实用的 smoke / fallback：
 
-## 一个重要约定
+- 当你刚 apply 完 ES 资产，想先确认查询有没有通
+- 当你还没打开 Kibana，想先看一眼结果
+- 当你要把结果交给自动化脚本继续处理
 
-当前默认契约下，logs 和 traces 都会写入同一个 alias：`<index-prefix>-events`。
+但真正给人看的长期入口，应该是：
+**Kibana data view + saved search / dashboard 资产。**
 
-简单理解就是：
-**生成出来的配置默认都走同一个统一入口。**
+## 这个项目最值的地方
 
-这样做的好处是 Collector、模板、生命周期和报表查询更容易保持一致，不容易出现“写得进去、但报表查不到”的错位。
+它真正的价值不是“帮你写文件”，而是把这些原来容易只做一半的事补齐：
 
-## 它适合你，如果
+- 自动生成 OTel 接入面
+- 自动准备 ES 入库面
+- 自动准备 ILM
+- 自动准备 Kibana 人类报表面
+- 自动把 ES / Kibana 资产 apply 到目标环境
 
-- 你有一个 agent 或 skill 项目
-- 你已经有 Elasticsearch 9.x，或者准备接 Elasticsearch 9.x
-- 你想先拿到一套能继续改、也能立刻验证的初稿，而不是从零开荒
+也就是说：
+**不是停在 bootstrap 文档，而是尽量把 agent observability 的第一套能力真正落到 ES 原生栈里。**
 
-## 它不适合你，如果
+## 当前实现重点
 
-- 你想要一个现成的在线观测平台 UI
-- 你希望它自动安装 Collector 二进制、自动改你的 agent 代码、再把整套平台全包掉
-- 你还没有 Elasticsearch，也不打算接 Elasticsearch
+这版重点已经切到你关心的地方：
 
-## 当前版本的边界
+- ES 资产不只是生成，还支持 apply
+- Kibana 资产不再缺席，已经进入主输出面和 apply 路径
+- `report.md` 降级成 smoke / fallback，不再拿它冒充产品主报表面
+- 不再拿别的 observability 产品当参照系，主叙事就是 **Elasticsearch + OTel + Kibana**
 
-当前版本解决的是 **bootstrap + apply + first report**，不是完整 observability 平台。
+## 当前边界
 
-它会做这些事：
+这个项目现在的边界不是“只做一半”，而是：
 
-- 扫描项目结构
-- 生成 Collector 配置
-- 生成 Elasticsearch 资产
-- 把资产真正 apply 到 Elasticsearch
-- 初始化首个写索引
-- 生成第一份报表
-- 生成 Collector 启动脚本和 agent 环境变量模板
+- 默认只生成 OTel Collector 侧配置，不会自动改写你的 agent 代码
+- 默认只做轻量归一化和脱敏，不会假装已经完成所有语义解析
+- 依赖 Elasticsearch / Kibana 可访问
+- Kibana 资产目前优先提供 data view + saved search 这类可直接落地的入口
 
-它现在不会替你做这些事：
-
-- 自动安装 Collector 二进制本体
-- 自动改写你的 agent 代码并替你植入 SDK
-- 自动接管历史数据
-- 提供完整在线 trace UI
-- 替代 Langfuse / Phoenix 这类平台的工作台
-
-## 默认安全策略
-
-这部分很重要，因为默认值就是产品态度：
-
-- 如果你传了 `--es-user` / `--es-password`，默认也**不会**把凭据直接写进 YAML
-- 默认会写成环境变量占位：`${env:ELASTICSEARCH_USERNAME}` / `${env:ELASTICSEARCH_PASSWORD}`
-- 只有显式加 `--embed-es-credentials`，才会把凭据内嵌进生成文件
-- 默认会删除 `gen_ai.prompt`、tool 参数、tool 结果，尽量避免把敏感内容原样落盘
-
-## 目标环境
-
-| 环境 | 状态 |
-|------|------|
-| 自建 Elasticsearch 9.x | ✅ 支持 |
-| 腾讯云 Elasticsearch Service 9.x | ✅ 支持 |
-| 其他托管环境 | 🔜 后续扩展 |
+这些边界的意思是：
+**它站在 ES 原生栈这边，把该准备的资产都尽量准备好，但不会假装自己已经接管了你的 agent runtime 本体。**
 
 ## 仓库结构
 
 ```text
-SKILL.md              agent 行为协议
-scripts/              发现、生成、apply、报表脚本
+SKILL.md              agent 调用协议
+scripts/              发现、生成、apply、报表主脚本
 references/           配置说明、字段说明、报表说明
-generated/            产出目录（默认不提交）
+generated/            默认产出目录（不提交）
 ```
 
-## 一个实用建议
+## 一句话总结
 
-第一次不要试图“把整套监控一次性上完”。
+如果你要做的是“基于 Elasticsearch 的智能体可观测”，那主线就应该很清楚：
 
-先做这三件事：
+**OpenTelemetry 负责采集，Elasticsearch 负责存储和分析，Kibana 负责人类报表入口。**
 
-1. 跑 `bootstrap_observability.py --apply-es-assets`
-2. 启动 `run-collector.sh`
-3. 看 `report.md` 里是不是已经有第一份结果
-
-先确认“它有没有看懂你的项目，而且链路真的通了”，再继续做深度定制，会轻松很多。
+这个项目的价值，就是帮你把这条线自动搭起来，而不是只吐几份文件然后停住。

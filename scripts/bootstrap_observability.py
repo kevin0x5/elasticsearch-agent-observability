@@ -26,7 +26,6 @@ from generate_report import build_report, render_markdown, search_payload
 from render_collector_config import render_config
 from render_es_assets import render_assets
 
-
 DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:4317"
 DEFAULT_COLLECTOR_BIN = "otelcol"
 
@@ -46,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-files", type=int, default=400)
     parser.add_argument("--apply-es-assets", action="store_true", help="Apply generated Elasticsearch assets to the target cluster")
     parser.add_argument("--skip-bootstrap-index", action="store_true", help="Do not create the first rollover write index")
+    parser.add_argument("--kibana-url", default="", help="Optional Kibana base URL for applying saved objects")
+    parser.add_argument("--kibana-space", default="default")
+    parser.add_argument("--apply-kibana-assets", action="store_true", help="Apply generated Kibana saved objects to the target Kibana instance")
     parser.add_argument("--report-output", help="Optional path for a generated markdown/json report")
     parser.add_argument("--report-format", choices=["markdown", "json"], help="Optional report output format override")
     parser.add_argument("--time-range", default="now-24h")
@@ -54,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def collect_summary_notes(discovery: dict, *, max_files: int, auth_mode: str, index_prefix: str) -> list[str]:
+def collect_summary_notes(discovery: dict, *, max_files: int, auth_mode: str, index_prefix: str, apply_kibana_assets: bool = False) -> list[str]:
     notes: list[str] = []
     if discovery.get("files_scanned", 0) >= max_files:
         notes.append(
@@ -69,6 +71,8 @@ def collect_summary_notes(discovery: dict, *, max_files: int, auth_mode: str, in
     elif auth_mode == "inline":
         notes.append("Collector YAML includes inline Elasticsearch credentials; treat the generated file as secret material.")
     notes.append(f"Logs and traces both write to `{index_prefix}-events`, which matches the generated rollover alias and index template.")
+    if apply_kibana_assets:
+        notes.append("Kibana saved objects are part of the generated asset surface, so the human-facing report path can land in Kibana instead of living only in Markdown.")
     return notes
 
 
@@ -126,11 +130,13 @@ def build_summary(
         f"- ingest pipeline: `{assets_paths['ingest_pipeline']}`",
         f"- ilm policy: `{assets_paths['ilm_policy']}`",
         f"- report config: `{assets_paths['report_config']}`",
+        f"- kibana bundle (json): `{assets_paths['kibana_saved_objects_json']}`",
+        f"- kibana bundle (ndjson): `{assets_paths['kibana_saved_objects_ndjson']}`",
     ]
     if apply_summary_path:
         lines.append(f"- apply summary: `{apply_summary_path}`")
     if report_output:
-        lines.append(f"- report: `{report_output}`")
+        lines.append(f"- smoke report: `{report_output}`")
     if notes:
         lines.extend(["", "## Notes", ""])
         lines.extend(f"- {note}" for note in notes)
@@ -138,7 +144,7 @@ def build_summary(
 
 
 def write_report(*, es_config: ESConfig, report_config_path: Path, output: Path, time_range: str, output_format: str | None) -> Path:
-    report_config = __import__("json").loads(Path(report_config_path).read_text(encoding="utf-8"))
+    report_config = json.loads(Path(report_config_path).read_text(encoding="utf-8"))
     events_alias = str(report_config.get("events_alias", "")).strip()
     result = es_request(es_config, "POST", f"/{events_alias}/_search", search_payload(time_range))
     report = build_report(result)
@@ -154,6 +160,8 @@ def write_report(*, es_config: ESConfig, report_config_path: Path, output: Path,
 def main() -> int:
     try:
         args = parse_args()
+        if args.apply_kibana_assets and not args.kibana_url.strip():
+            raise SkillError("--kibana-url is required when --apply-kibana-assets is enabled")
         workspace = validate_workspace_dir(Path(args.workspace), "Workspace")
         output_dir = ensure_dir(Path(args.output_dir).expanduser().resolve())
         index_prefix = validate_index_prefix(args.index_prefix)
@@ -205,12 +213,15 @@ def main() -> int:
             es_user=credentials[0] if credentials else None,
             es_password=credentials[1] if credentials else None,
         )
-        if args.apply_es_assets:
+        if args.apply_es_assets or args.apply_kibana_assets:
             apply_summary = apply_assets(
                 es_config,
                 assets_dir=assets_dir,
                 index_prefix=index_prefix,
                 bootstrap_index=not args.skip_bootstrap_index,
+                kibana_url=args.kibana_url.strip() or None,
+                kibana_space=args.kibana_space,
+                apply_kibana=args.apply_kibana_assets,
             )
             apply_summary_path = assets_dir / "apply-summary.json"
             write_json(apply_summary_path, apply_summary)
@@ -228,11 +239,19 @@ def main() -> int:
                 output_format=args.report_format,
             )
 
-        notes = collect_summary_notes(discovery, max_files=max_files, auth_mode=auth_mode, index_prefix=index_prefix)
+        notes = collect_summary_notes(
+            discovery,
+            max_files=max_files,
+            auth_mode=auth_mode,
+            index_prefix=index_prefix,
+            apply_kibana_assets=args.apply_kibana_assets,
+        )
         if apply_summary_path:
             notes.append("Elasticsearch assets were applied to the target cluster, including template, pipeline, ILM policy, and optional write-index bootstrap.")
+        if args.apply_kibana_assets:
+            notes.append("Kibana saved objects were applied, so the default human-facing observability surface now lives in Kibana Discover / saved searches.")
         if report_output_path:
-            notes.append("A runtime report was generated as part of bootstrap so you can immediately validate the query path.")
+            notes.append("A markdown/json smoke report was also generated so you can validate the query path before opening Kibana.")
         notes.append("Use `run-collector.sh` to start the Collector and `agent-otel.env` as the runtime env template for the agent process.")
 
         summary_path = output_dir / "bootstrap-summary.md"
@@ -254,10 +273,11 @@ def main() -> int:
         print(f"   discovery: {discovery_path}")
         print(f"   collector: {collector_path}")
         print(f"   launcher: {collector_run_path}")
+        print(f"   kibana bundle: {assets_paths['kibana_saved_objects_ndjson']}")
         if apply_summary_path:
             print(f"   apply summary: {apply_summary_path}")
         if report_output_path:
-            print(f"   report: {report_output_path}")
+            print(f"   smoke report: {report_output_path}")
         print(f"   summary: {summary_path}")
         return 0
     except SkillError as exc:

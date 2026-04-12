@@ -1,32 +1,43 @@
 ---
 name: elasticsearch-agent-observability
-description: "Bootstrap observability for an agent on self-hosted Elasticsearch 9.x or Tencent Cloud Elasticsearch Service 9.x. Trigger when the user wants to monitor an agent, trace tool/model calls, generate observability configs, or auto-discover what parts of the agent architecture should be monitored."
+description: "Use Elasticsearch, OpenTelemetry, and Kibana to build observability for the current agent or a specified agent: generate collection config, storage assets, lifecycle policy, and Kibana report surfaces, then apply them when the user wants a working bootstrap."
 ---
 
 # Elasticsearch Agent Observability
 
 ## What This Skill Is
 
-`Elasticsearch Agent Observability` bootstraps observability for an agent runtime.
+`Elasticsearch Agent Observability` is not a Markdown report generator.
+It is a **native Elastic-stack observability builder for agents**.
 
-This skill is for requests like:
+Trigger it for requests like:
 - “给这个 agent 建可观测能力”
-- “用 Elasticsearch 监控当前 agent”
-- “自动发现这个 agent 里该监测哪些模块”
-- “给某个 agent 生成 OTel + ES 9.x 配置和报表”
+- “用 Elasticsearch 给当前 agent 接观测”
+- “帮我把这个 agent 的 OTel / ES / Kibana 观测面搭起来”
+- “给某个 agent 生成采集、存储、生命周期和 Kibana 报表入口”
 
-It is built for:
-- self-hosted Elasticsearch 9.x
-- Tencent Cloud Elasticsearch Service 9.x
+## Default Product Behavior
+
+When triggered, the skill should push toward this product path:
+
+1. inspect the current or specified agent workspace
+2. auto-discover monitorable modules
+3. generate OTel Collector config and runtime env / launcher artifacts
+4. generate Elasticsearch template, ingest pipeline, lifecycle policy, and write-index bootstrap path
+5. generate Kibana saved objects for the human-facing report surface
+6. apply ES assets and Kibana assets when the user wants a working bootstrap
+7. optionally output a smoke Markdown / JSON report to validate the query path
 
 ## Core Behavior
 
-The skill should:
-1. inspect the target workspace or agent layout
-2. auto-discover monitorable modules
-3. render Collector config and Elasticsearch assets
-4. apply Elasticsearch assets when the user wants a real bootstrap, including the first write index
-5. generate report outputs plus runtime launcher/env artifacts
+The skill should aim to cover these surfaces together:
+- collection
+- normalization / ingest
+- storage
+- lifecycle management
+- Kibana report surface
+
+Do not frame the product as “just bootstrap docs” when the request is clearly asking for a working observability capability.
 
 ## Resolve the Script Path
 
@@ -40,7 +51,8 @@ The main outputs are:
 - rendered OTel Collector config
 - Collector launcher and agent env template
 - Elasticsearch assets and apply summary
-- Markdown / JSON report
+- Kibana saved objects bundle
+- optional smoke Markdown / JSON report
 
 ## Commands
 
@@ -54,7 +66,8 @@ The main outputs are:
 ## Important Notes
 
 - Use Elasticsearch 9.x compatible assets
-- Prefer direct, practical outputs over abstract observability theory
+- Keep the human-facing report story on Kibana, not on Markdown alone
+- Treat Markdown / JSON reports as smoke / fallback outputs, not the main long-term UI story
 - Keep sensitive prompts, args, and results in redacted or summarized form by default
-- Do not pretend the repo installed the Collector binary or rewired the agent SDK if it only generated launcher/env files
+- Do not pretend the repo rewired the agent SDK if it only generated Collector + env artifacts
 - For deeper rules, read `references/architecture.md`, `references/config_guide.md`, `references/telemetry_schema.md`, and `references/reporting.md`

@@ -1,56 +1,46 @@
 # elasticsearch-agent-observability
 
-> 给一个 agent 项目快速搭起 **可观测底座**。你可以把它理解成：先帮你看代码，再替你生成一套能跑起来的采集、入库和查询初稿。
+> 给一个 agent 项目快速搭起可观测底座：先看懂结构，再产出一套能跑起来的采集、入库和查询初稿。
 
-## 你什么时候会想用它
+## 这个项目是干什么的
 
-通常是这种情况：
+很多 agent 项目不是不需要 observability，而是第一步太容易卡住。
 
-- 你手上已经有一个 agent 项目，但出了问题时很难知道卡在哪
-- 你开始关心调用次数、耗时、错误、token、成本这些数据
-- 你知道应该做可观测，但一想到 Collector、模板、索引、报表就头大
+你明明知道迟早要看这些东西：
 
-这个项目就是为这一步准备的。
+- 调用次数
+- 耗时分布
+- 错误类型
+- token 和成本
+- 哪些 tool 最容易出问题
 
-它会先看你的项目结构，猜出哪些地方值得监测，再替你生成一套**能落地的初始配置**。
+但真要开始做时，问题马上变成一串碎活：Collector 怎么配、索引模板怎么建、生命周期怎么设、报表要查什么。
 
-## 它真正帮你省掉什么
+`elasticsearch-agent-observability` 做的不是完整平台，而是把这第一步搭起来：
+**先看你的项目结构，再替你生成一套前后能对上的 observability 初稿。**
 
-很多团队不是不想做 observability，而是第一步太碎：
+## 你会在什么场景用它
 
-- Collector 配置要写
-- Elasticsearch 模板要建
-- 生命周期要配
-- 报表查询也要自己想
+- 你已经有一个 agent 或 skill 项目，但出了问题时很难知道卡在哪
+- 你准备把运行数据接到 Elasticsearch 9.x
+- 你不想从零手写一堆 Collector YAML、模板、生命周期和查询配置
 
-这个项目的价值不是“做完整平台”，而是把这些最容易卡住启动的事情先做成一个初稿。
+## 你真正会得到什么
 
-你可以把它理解成：
-**先帮你把底座搭起来，再决定后面怎么接。**
+跑完之后，你会拿到一套可继续修改的产物：
 
-## 第一次使用，先看这件事有没有成立
+- 一份项目结构识别结果，知道它看懂了什么
+- 一份 Collector 配置草稿，知道数据准备怎么采
+- 一套 Elasticsearch 资产，知道数据准备怎么落
+- 一份报表配置，知道后面准备怎么查
+- 一份摘要说明，知道哪里靠谱、哪里要小心
 
-第一次跑它，不要先追求“监控体系很完整”，先看一件事：
+这就是它的价值：
+**不是替你一次性做完平台，而是替你把最难开始的那一步做完。**
 
-**它有没有基本看懂你的项目。**
+## 3 分钟跑通
 
-如果它能识别出主要模块，并生成一套前后能对上的配置，那这一步就已经值回票价。
-
-## 哪些情况适合直接用
-
-- 你有一个 agent 或 skill 项目
-- 你已经有 Elasticsearch 9.x，或者准备接 Elasticsearch 9.x
-- 你想先得到一套能继续改的配置，而不是从零手写
-
-## 哪些情况先别指望它
-
-- 你想要一个现成的在线观测平台 UI
-- 你希望它自动部署所有组件
-- 你还没有 Elasticsearch，也不打算接 Elasticsearch
-
-## 3 分钟上手
-
-如果你不想先研究术语，先跑这一条命令。
+第一次上手，先别研究术语，先跑这一条命令。
 
 ```bash
 python scripts/bootstrap_observability.py \
@@ -64,9 +54,21 @@ python scripts/bootstrap_observability.py \
 - `/path/to/your-agent`：你的 agent 项目目录
 - `http://localhost:9200`：你的 Elasticsearch 地址
 
-这个命令**不会修改你的 agent 源码**，它只会在 `generated/bootstrap/` 下面生成文件。
+这个命令**不会修改你的 agent 源码**，只会在 `generated/bootstrap/` 下生成文件。
 
-## 跑完之后你会看到什么
+## 第一次跑完，先看什么
+
+优先看这两个文件：
+
+- `generated/bootstrap/bootstrap-summary.md`
+- `generated/bootstrap/discovery.json`
+
+第一次使用时，不要先追求“监控体系是不是完整”，先看一件事：
+**它有没有基本看懂你的项目。**
+
+如果它识别出了主要模块，并生成了一套前后能对上的配置，这一步就已经值回票价。
+
+## 你会看到哪些产物
 
 ```text
 generated/bootstrap/
@@ -80,92 +82,72 @@ generated/bootstrap/
 └── bootstrap-summary.md
 ```
 
-这些文件分别代表：
+可以把它们理解成：
 
-- `discovery.json`：它猜你的项目里有哪些关键模块
-- `otel-collector.generated.yaml`：Collector 配置草稿
-- `index-template.json`：字段模板
-- `ingest-pipeline.json`：入库前做什么清洗
+- `discovery.json`：它觉得你的项目里有哪些关键模块
+- `otel-collector.generated.yaml`：数据准备怎么采
+- `index-template.json`：数据准备怎么存
+- `ingest-pipeline.json`：入库前做哪些清洗
 - `ilm-policy.json`：数据保留多久、什么时候滚动
-- `report-config.json`：报表查询用什么索引和指标
+- `report-config.json`：报表准备怎么查
 - `bootstrap-summary.md`：给人看的结果摘要和告警
 
-如果你只看一个文件，先看 `bootstrap-summary.md`。
+## 如果第一次结果不对，通常先查什么
 
-## 第一次用，不必先搞懂所有术语
+优先看 `bootstrap-summary.md` 的提示，常见情况有这些：
 
-你现在不用先把 Collector、索引模板、ILM 这些词都搞明白。
+- `Discovery reached the --max-files limit`：项目太大，可能没扫全
+- `No monitorable modules were detected`：路径不对，或者当前启发式没有识别出来
+- `credentials were not written to disk`：不是报错，是在提醒你当前采用了更安全的默认模式
+- 如果你显式使用了 `--embed-es-credentials`：把生成的 YAML 当成敏感文件处理
 
-第一次使用，你只要这样理解就够了：
-
-- 它先看你的项目结构
-- 再帮你产出一套“数据怎么采、进库前怎么整理、最后怎么查”的初稿
-- 你确认方向大致对，再继续往下接真实环境
-
-先把第一步跑通，比一开始把名词全背下来更重要。
-
-## 它大概能识别什么
-
-它会从项目里尝试识别这些常见部分：
-
-- 入口脚本
-- 命令行接口
-- tool 调用层
-- model 调用层
-- memory / cache
-- MCP 接口
-- workflow / planner
-- 已有 telemetry 相关代码
-
-你不需要一开始就理解这些模块名。你只需要知道：
-**它会根据项目结构，决定该生成哪些默认监测项。**
-
-## 默认安全策略
-
-这部分对新手也很重要：
-
-- 如果你传了 `--es-user` / `--es-password`，默认也**不会**把凭据直接写进 YAML
-- 默认会写成环境变量占位：`${env:ELASTICSEARCH_USERNAME}` / `${env:ELASTICSEARCH_PASSWORD}`
-- 只有显式加 `--embed-es-credentials`，才会把凭据内嵌进生成文件
-- 默认会对 `gen_ai.prompt`、tool 参数、tool 结果做删除，避免把敏感内容原样落盘
-
-## 一个关键约定
+## 一个重要约定
 
 当前默认契约下，logs 和 traces 都会写入同一个 alias：`<index-prefix>-events`。
 
-你可以先把它理解成：
-**所有生成的配置，默认都指向同一个统一入口。**
+简单理解就是：
+**生成出来的配置默认都走同一个统一入口。**
 
-这样做的好处是：Collector、index template、ILM、report query 四处更容易保持一致，不容易出现“写进去了，但报表查不到”的情况。
+这样做的好处是 Collector、模板、生命周期和报表查询更容易保持一致，不容易出现“写得进去、但报表查不到”的错位。
 
-## 跑完后怎么判断有没有问题
+## 它适合你，如果
 
-优先看 `bootstrap-summary.md` 里的提示。
+- 你有一个 agent 或 skill 项目
+- 你已经有 Elasticsearch 9.x，或者准备接 Elasticsearch 9.x
+- 你想先拿到一套能继续改的初稿，而不是从零开荒
 
-常见情况：
+## 它不适合你，如果
 
-- 出现 `Discovery reached the --max-files limit`：项目太大，可能没扫全
-- 出现 `No monitorable modules were detected`：路径不对，或者当前启发式没有识别出来
-- 出现 “credentials were not written to disk”：这不是报错，是在提醒你当前是更安全的默认模式
-- 如果你显式使用了 `--embed-es-credentials`：把生成的 YAML 当成敏感文件处理
+- 你想要一个现成的在线观测平台 UI
+- 你希望它自动部署所有组件
+- 你还没有 Elasticsearch，也不打算接 Elasticsearch
 
-## v1 能力边界
+## 当前版本的边界
 
 当前版本解决的是 **bootstrap**，不是完整 observability 平台。
 
-它会做：
+它会做这些事：
 
 - 扫描项目结构
 - 生成 Collector 配置
 - 生成 Elasticsearch 资产
 - 生成报表配置
 
-它现在**不会**做：
+它现在不会替你做这些事：
 
 - 自动部署 Collector
 - 自动接管历史数据
 - 提供完整在线 trace UI
 - 替代 Langfuse / Phoenix 这类平台的工作台
+
+## 默认安全策略
+
+这部分很重要，因为默认值就是产品态度：
+
+- 如果你传了 `--es-user` / `--es-password`，默认也**不会**把凭据直接写进 YAML
+- 默认会写成环境变量占位：`${env:ELASTICSEARCH_USERNAME}` / `${env:ELASTICSEARCH_PASSWORD}`
+- 只有显式加 `--embed-es-credentials`，才会把凭据内嵌进生成文件
+- 默认会删除 `gen_ai.prompt`、tool 参数、tool 结果，尽量避免把敏感内容原样落盘
 
 ## 目标环境
 
@@ -185,7 +167,7 @@ assets/               默认模板
 generated/            产出目录（默认不提交）
 ```
 
-## 给零基础读者的建议
+## 一个实用建议
 
 第一次不要试图“把整套监控一次性上完”。
 

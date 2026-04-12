@@ -22,6 +22,10 @@ DISCOVERY_SAMPLE = {
         {"module_kind": "tool_registry"},
         {"module_kind": "model_adapter"},
     ],
+    "recommended_ingest_modes": [
+        {"mode": "collector", "score": 0.94},
+        {"mode": "apm-otlp-hybrid", "score": 0.88},
+    ],
 }
 
 
@@ -52,14 +56,98 @@ class ContractsAndSecurityTests(unittest.TestCase):
             embed_credentials=True,
         )
         self.assertIn("super-secret", rendered)
-        self.assertIn('logs_index: "agent-obsv-events"', rendered)
-        self.assertIn('traces_index: "agent-obsv-events"', rendered)
+        self.assertIn('"agent-obsv-events"', rendered)
 
-    def test_render_assets_and_report_share_same_events_alias(self) -> None:
-        template = render_es_assets.build_index_template("agent-obsv", ["tool_registry", "model_adapter"])
+    def test_render_config_includes_metrics_pipeline(self) -> None:
+        rendered = render_collector_config.render_config(
+            DISCOVERY_SAMPLE,
+            es_url="http://localhost:9200",
+            index_prefix="agent-obsv",
+            environment="dev",
+            service_name="agent-runtime",
+        )
+        self.assertIn("metrics:", rendered)
+        self.assertIn("spanmetrics", rendered)
+        self.assertIn("elasticsearch/metrics", rendered)
+
+    def test_render_config_supports_filelog_receiver(self) -> None:
+        rendered = render_collector_config.render_config(
+            DISCOVERY_SAMPLE,
+            es_url="http://localhost:9200",
+            index_prefix="agent-obsv",
+            environment="dev",
+            service_name="agent-runtime",
+            enable_filelog=True,
+            filelog_path="/tmp/agent.log",
+        )
+        self.assertIn("filelog", rendered)
+        self.assertIn("/tmp/agent.log", rendered)
+
+    def test_render_config_supports_probabilistic_sampling(self) -> None:
+        rendered = render_collector_config.render_config(
+            DISCOVERY_SAMPLE,
+            es_url="http://localhost:9200",
+            index_prefix="agent-obsv",
+            environment="dev",
+            service_name="agent-runtime",
+            sampling_ratio=0.5,
+        )
+        self.assertIn("probabilistic_sampler", rendered)
+        self.assertIn("50.0", rendered)
+
+    def test_index_template_uses_data_streams(self) -> None:
+        template = render_es_assets.build_index_template("agent-obsv", ["tool_registry"])
+        self.assertIn("data_stream", template)
+        self.assertEqual(template["index_patterns"], ["agent-obsv-events*"])
+        self.assertEqual(len(template["composed_of"]), 2)
+
+    def test_component_template_ecs_base_has_ecs_fields(self) -> None:
+        component = render_es_assets.build_component_template_ecs_base("agent-obsv")
+        props = component["template"]["mappings"]["properties"]
+        self.assertIn("@timestamp", props)
+        self.assertIn("event.outcome", props)
+        self.assertIn("service.name", props)
+        self.assertIn("trace.id", props)
+        self.assertIn("gen_ai.usage.input_tokens", props)
+        self.assertIn("gen_ai.agent.tool_name", props)
+        self.assertIn("captured_at", props)
+        self.assertEqual(props["captured_at"]["type"], "alias")
+
+    def test_ilm_policy_has_tiered_phases(self) -> None:
+        ilm = render_es_assets.build_ilm_policy(30)
+        phases = ilm["policy"]["phases"]
+        self.assertIn("hot", phases)
+        self.assertIn("warm", phases)
+        self.assertIn("cold", phases)
+        self.assertIn("frozen", phases)
+        self.assertIn("delete", phases)
+
+    def test_ingest_pipeline_does_ecs_rename_and_structured_parsing(self) -> None:
+        pipeline = render_es_assets.build_ingest_pipeline(["tool_registry"])
+        processor_types = []
+        for item in pipeline["processors"]:
+            processor_types.extend(item.keys())
+        self.assertIn("rename", processor_types)
+        self.assertIn("json", processor_types)
+        self.assertIn("script", processor_types)
+        set_processors = [item["set"] for item in pipeline["processors"] if "set" in item]
+        self.assertTrue(any(proc.get("field") == "@timestamp" for proc in set_processors))
+
+    def test_kibana_objects_include_lens_and_alert(self) -> None:
+        bundle = render_es_assets.build_kibana_saved_objects("agent-obsv")
+        types = {obj["type"] for obj in bundle["objects"]}
+        self.assertIn("lens", types)
+        self.assertIn("dashboard", types)
+        self.assertIn("alert", types)
+        self.assertIn("search", types)
+        self.assertIn("index-pattern", types)
+        self.assertGreaterEqual(bundle["summary"]["object_count"], 8)
+
+    def test_report_config_uses_data_stream_and_timestamp(self) -> None:
         report_config = render_es_assets.build_report_config("agent-obsv", DISCOVERY_SAMPLE)
-        self.assertEqual(template["template"]["settings"]["index.lifecycle.rollover_alias"], report_config["events_alias"])
-        self.assertEqual(template["index_patterns"], ["agent-obsv-events-*"])
+        self.assertEqual(report_config["time_field"], "@timestamp")
+        self.assertIn("data_stream", report_config)
+        self.assertEqual(report_config["data_stream"], "agent-obsv-events")
         self.assertIn("dashboard_id", report_config["kibana"])
 
     def test_collect_summary_notes_reports_truncation_and_auth_mode(self) -> None:
@@ -74,11 +162,6 @@ class ContractsAndSecurityTests(unittest.TestCase):
         self.assertTrue(any("credentials were not written to disk" in note for note in notes))
         self.assertTrue(any("agent-obsv-events" in note for note in notes))
         self.assertTrue(any("Selected ingest mode" in note for note in notes))
-
-    def test_build_ingest_pipeline_stamps_captured_at(self) -> None:
-        pipeline = render_es_assets.build_ingest_pipeline(["tool_registry"])
-        set_processors = [item["set"] for item in pipeline["processors"] if "set" in item]
-        self.assertTrue(any(proc.get("field") == "captured_at" for proc in set_processors))
 
     def test_search_payload_uses_custom_time_field(self) -> None:
         payload = generate_report.search_payload("now-24h", time_field="event.ingested")

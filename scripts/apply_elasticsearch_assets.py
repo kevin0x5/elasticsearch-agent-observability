@@ -13,7 +13,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from common import ESConfig, SkillError, build_events_alias, es_request, print_error, read_json, validate_credential_pair, validate_index_prefix, validate_workspace_dir
+from common import (
+    ESConfig,
+    SkillError,
+    build_component_template_name,
+    build_data_stream_name,
+    build_events_alias,
+    es_request,
+    print_error,
+    read_json,
+    validate_credential_pair,
+    validate_index_prefix,
+    validate_workspace_dir,
+)
 
 RESOURCE_ALREADY_EXISTS = "resource_already_exists_exception"
 
@@ -25,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--es-user", default="")
     parser.add_argument("--es-password", default="")
     parser.add_argument("--index-prefix", default="agent-obsv")
-    parser.add_argument("--skip-bootstrap-index", action="store_true", help="Skip creating the initial write index and alias")
+    parser.add_argument("--skip-bootstrap-index", action="store_true", help="Skip creating the data stream")
     parser.add_argument("--kibana-url", default="", help="Optional Kibana base URL for applying saved objects")
     parser.add_argument("--kibana-space", default="default")
     parser.add_argument("--skip-kibana-assets", action="store_true", help="Skip applying Kibana saved objects even if present")
@@ -35,16 +47,23 @@ def parse_args() -> argparse.Namespace:
 def load_assets(assets_dir: Path) -> dict[str, Any]:
     resolved = validate_workspace_dir(assets_dir, "Assets directory")
     kibana_json = resolved / "kibana-saved-objects.json"
-    return {
+    result: dict[str, Any] = {
         "index_template": read_json(resolved / "index-template.json"),
         "ingest_pipeline": read_json(resolved / "ingest-pipeline.json"),
         "ilm_policy": read_json(resolved / "ilm-policy.json"),
         "report_config": read_json(resolved / "report-config.json"),
         "kibana_saved_objects": read_json(kibana_json) if kibana_json.exists() else None,
     }
+    ecs_base_path = resolved / "component-template-ecs-base.json"
+    settings_path = resolved / "component-template-settings.json"
+    if ecs_base_path.exists():
+        result["component_template_ecs_base"] = read_json(ecs_base_path)
+    if settings_path.exists():
+        result["component_template_settings"] = read_json(settings_path)
+    return result
 
 
-def kibana_request(config: ESConfig, kibana_url: str, method: str, path: str, payload: dict | None = None) -> dict[str, Any]:
+def kibana_request(config: ESConfig, kibana_url: str, method: str, path: str, payload: dict | None = None, *, body_bytes: bytes | None = None) -> dict[str, Any]:
     url = kibana_url.rstrip("/") + path
     request = urllib.request.Request(url, method=method.upper())
     request.add_header("Content-Type", "application/json")
@@ -52,8 +71,8 @@ def kibana_request(config: ESConfig, kibana_url: str, method: str, path: str, pa
     if config.es_user and config.es_password:
         token = base64.b64encode(f"{config.es_user}:{config.es_password}".encode("utf-8")).decode("ascii")
         request.add_header("Authorization", f"Basic {token}")
-    body = None
-    if payload is not None:
+    body = body_bytes
+    if body is None and payload is not None:
         body = json.dumps(payload).encode("utf-8")
     try:
         with urllib.request.urlopen(request, data=body, timeout=config.timeout_seconds) as response:  # noqa: S310
@@ -76,24 +95,41 @@ def build_space_prefix(space: str) -> str:
     return "" if normalized == "default" else f"/s/{quote(normalized, safe='')}"
 
 
-def ensure_write_index(config: ESConfig, index_prefix: str) -> dict[str, str]:
-    events_alias = build_events_alias(index_prefix)
-    write_index = f"{events_alias}-000001"
-    create_payload = {"aliases": {events_alias: {"is_write_index": True}}}
+def ensure_data_stream(config: ESConfig, index_prefix: str) -> dict[str, str]:
+    ds_name = build_data_stream_name(index_prefix)
     status = "created"
     try:
-        es_request(config, "PUT", f"/{write_index}", create_payload)
+        es_request(config, "PUT", f"/_data_stream/{ds_name}")
     except SkillError as exc:
-        if RESOURCE_ALREADY_EXISTS not in str(exc):
+        if RESOURCE_ALREADY_EXISTS in str(exc) or "already exists" in str(exc).lower():
+            status = "already_exists"
+        else:
             raise
-        status = "already_exists"
-        es_request(
-            config,
-            "POST",
-            "/_aliases",
-            {"actions": [{"add": {"index": write_index, "alias": events_alias, "is_write_index": True}}]},
-        )
-    return {"events_alias": events_alias, "write_index": write_index, "status": status}
+    return {"data_stream": ds_name, "status": status}
+
+
+def ensure_write_index(config: ESConfig, index_prefix: str) -> dict[str, str]:
+    """Backward compat: create data stream, or fall back to legacy alias bootstrap."""
+    try:
+        return ensure_data_stream(config, index_prefix)
+    except SkillError:
+        events_alias = build_events_alias(index_prefix)
+        write_index = f"{events_alias}-000001"
+        create_payload = {"aliases": {events_alias: {"is_write_index": True}}}
+        status = "created"
+        try:
+            es_request(config, "PUT", f"/{write_index}", create_payload)
+        except SkillError as exc:
+            if RESOURCE_ALREADY_EXISTS not in str(exc):
+                raise
+            status = "already_exists"
+            es_request(
+                config,
+                "POST",
+                "/_aliases",
+                {"actions": [{"add": {"index": write_index, "alias": events_alias, "is_write_index": True}}]},
+            )
+        return {"events_alias": events_alias, "write_index": write_index, "status": status}
 
 
 def apply_kibana_saved_objects(config: ESConfig, *, kibana_url: str, kibana_space: str, bundle: dict[str, Any]) -> dict[str, Any]:
@@ -145,12 +181,25 @@ def apply_assets(
     pipeline_name = f"{validated_prefix}-normalize"
     ilm_name = f"{validated_prefix}-lifecycle"
 
-    responses = {
+    responses: dict[str, Any] = {
         "ilm_policy": es_request(config, "PUT", f"/_ilm/policy/{ilm_name}", assets["ilm_policy"]),
         "ingest_pipeline": es_request(config, "PUT", f"/_ingest/pipeline/{pipeline_name}", assets["ingest_pipeline"]),
-        "index_template": es_request(config, "PUT", f"/_index_template/{template_name}", assets["index_template"]),
-        "report_config": assets["report_config"],
     }
+
+    if assets.get("component_template_ecs_base"):
+        ecs_base_name = build_component_template_name(validated_prefix, "ecs-base")
+        responses["component_template_ecs_base"] = es_request(
+            config, "PUT", f"/_component_template/{ecs_base_name}", assets["component_template_ecs_base"]
+        )
+    if assets.get("component_template_settings"):
+        settings_name = build_component_template_name(validated_prefix, "settings")
+        responses["component_template_settings"] = es_request(
+            config, "PUT", f"/_component_template/{settings_name}", assets["component_template_settings"]
+        )
+
+    responses["index_template"] = es_request(config, "PUT", f"/_index_template/{template_name}", assets["index_template"])
+    responses["report_config"] = assets["report_config"]
+
     bootstrap_summary = None
     if bootstrap_index:
         bootstrap_summary = ensure_write_index(config, validated_prefix)
@@ -171,6 +220,7 @@ def apply_assets(
         "pipeline_name": pipeline_name,
         "ilm_policy_name": ilm_name,
         "events_alias": build_events_alias(validated_prefix),
+        "data_stream": build_data_stream_name(validated_prefix),
         "bootstrap_index": bootstrap_summary,
         "kibana": kibana_summary,
         "responses": responses,
@@ -196,10 +246,10 @@ def main() -> int:
             apply_kibana=not args.skip_kibana_assets,
         )
         print("✅ Elasticsearch assets applied")
-        print(f"   alias: {summary['events_alias']}")
+        print(f"   data stream: {summary['data_stream']}")
         if summary["bootstrap_index"]:
-            print(f"   write index: {summary['bootstrap_index']['write_index']}")
-            print(f"   bootstrap status: {summary['bootstrap_index']['status']}")
+            bs = summary["bootstrap_index"]
+            print(f"   bootstrap: {bs.get('data_stream') or bs.get('write_index')} ({bs['status']})")
         if summary.get("kibana"):
             print(f"   kibana objects: {summary['kibana']['count']}")
         return 0

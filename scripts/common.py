@@ -141,6 +141,14 @@ def build_events_alias(index_prefix: str) -> str:
     return f"{index_prefix}-events"
 
 
+def build_data_stream_name(index_prefix: str, signal_type: str = "events") -> str:
+    return f"{index_prefix}-{signal_type}"
+
+
+def build_component_template_name(index_prefix: str, component: str) -> str:
+    return f"{index_prefix}-{component}"
+
+
 def iter_text_files(workspace: Path, max_files: int = 400, max_bytes: int = 200_000) -> list[Path]:
     discovered: list[Path] = []
     for path in workspace.rglob("*"):

@@ -19,10 +19,12 @@ class ApplyAndBootstrapTests(unittest.TestCase):
     def test_apply_assets_calls_expected_es_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             assets_dir = Path(tmp_dir)
-            (assets_dir / "index-template.json").write_text('{"index_patterns": ["agent-obsv-events-*"]}', encoding="utf-8")
+            (assets_dir / "component-template-ecs-base.json").write_text('{"template": {"mappings": {}}}', encoding="utf-8")
+            (assets_dir / "component-template-settings.json").write_text('{"template": {"settings": {}}}', encoding="utf-8")
+            (assets_dir / "index-template.json").write_text('{"index_patterns": ["agent-obsv-events*"], "data_stream": {}}', encoding="utf-8")
             (assets_dir / "ingest-pipeline.json").write_text('{"processors": []}', encoding="utf-8")
             (assets_dir / "ilm-policy.json").write_text('{"policy": {"phases": {}}}', encoding="utf-8")
-            (assets_dir / "report-config.json").write_text('{"events_alias": "agent-obsv-events"}', encoding="utf-8")
+            (assets_dir / "report-config.json").write_text('{"events_alias": "agent-obsv-events", "data_stream": "agent-obsv-events"}', encoding="utf-8")
             (assets_dir / "kibana-saved-objects.json").write_text('{"objects": []}', encoding="utf-8")
             calls = []
 
@@ -41,19 +43,20 @@ class ApplyAndBootstrapTests(unittest.TestCase):
         self.assertEqual(summary["template_name"], "agent-obsv-events-template")
         self.assertTrue(any(path == "/_ilm/policy/agent-obsv-lifecycle" for _, path, _ in calls))
         self.assertTrue(any(path == "/_ingest/pipeline/agent-obsv-normalize" for _, path, _ in calls))
+        self.assertTrue(any("_component_template" in path for _, path, _ in calls))
         self.assertTrue(any(path == "/_index_template/agent-obsv-events-template" for _, path, _ in calls))
-        self.assertTrue(any(path == "/agent-obsv-events-000001" for _, path, _ in calls))
+        self.assertTrue(any("_data_stream" in path for _, path, _ in calls))
 
     def test_apply_assets_can_push_kibana_saved_objects(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             assets_dir = Path(tmp_dir)
-            (assets_dir / "index-template.json").write_text('{"index_patterns": ["agent-obsv-events-*"]}', encoding="utf-8")
+            (assets_dir / "index-template.json").write_text('{"index_patterns": ["agent-obsv-events*"], "data_stream": {}}', encoding="utf-8")
             (assets_dir / "ingest-pipeline.json").write_text('{"processors": []}', encoding="utf-8")
             (assets_dir / "ilm-policy.json").write_text('{"policy": {"phases": {}}}', encoding="utf-8")
             (assets_dir / "report-config.json").write_text('{"events_alias": "agent-obsv-events"}', encoding="utf-8")
             (assets_dir / "kibana-saved-objects.json").write_text(
                 '{"objects": ['
-                '{"type": "index-pattern", "id": "agent-obsv-events-view", "attributes": {"title": "agent-obsv-events*", "timeFieldName": "captured_at"}},'
+                '{"type": "index-pattern", "id": "agent-obsv-events-view", "attributes": {"title": "agent-obsv-events*", "timeFieldName": "@timestamp"}},'
                 '{"type": "search", "id": "agent-obsv-event-stream", "attributes": {"title": "Agent observability event stream", "kibanaSavedObjectMeta": {"searchSourceJSON": "{}"}}, "references": []}'
                 '] }',
                 encoding="utf-8",
@@ -63,7 +66,7 @@ class ApplyAndBootstrapTests(unittest.TestCase):
             def fake_es_request(config, method, path, payload=None):
                 return {"acknowledged": True}
 
-            def fake_kibana_request(config, kibana_url, method, path, payload=None):
+            def fake_kibana_request(config, kibana_url, method, path, payload=None, *, body_bytes=None):
                 kibana_calls.append((method, path, payload))
                 return {"id": path.rsplit("/", 1)[-1]}
 

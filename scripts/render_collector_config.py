@@ -9,6 +9,7 @@ from pathlib import Path
 
 from common import (
     SkillError,
+    build_data_stream_name,
     build_events_alias,
     print_error,
     read_json,
@@ -33,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--environment", default="dev")
     parser.add_argument("--service-name", default="agent-runtime")
     parser.add_argument("--embed-es-credentials", action="store_true", help="Embed Elasticsearch credentials into the generated YAML")
+    parser.add_argument("--grpc-port", type=int, default=4317)
+    parser.add_argument("--http-port", type=int, default=4318)
+    parser.add_argument("--sampling-ratio", type=float, default=1.0, help="Probabilistic sampling ratio (0.0 to 1.0)")
+    parser.add_argument("--enable-filelog", action="store_true", help="Add filelog receiver for local agent log files")
+    parser.add_argument("--filelog-path", default="/var/log/agent/*.log")
     return parser.parse_args()
 
 
@@ -50,6 +56,11 @@ def render_config(
     es_user: str = "",
     es_password: str = "",
     embed_credentials: bool = False,
+    grpc_port: int = 4317,
+    http_port: int = 4318,
+    sampling_ratio: float = 1.0,
+    enable_filelog: bool = False,
+    filelog_path: str = "/var/log/agent/*.log",
 ) -> str:
     validated_prefix = validate_index_prefix(index_prefix)
     credentials = validate_credential_pair(es_user, es_password)
@@ -83,13 +94,50 @@ def render_config(
                 f"\n    user: {_yaml_scalar(f'${{env:{DEFAULT_ES_USER_ENV}}}') }"
                 f"\n    password: {_yaml_scalar(f'${{env:{DEFAULT_ES_PASSWORD_ENV}}}') }"
             )
+
     events_alias = build_events_alias(validated_prefix)
+    metrics_index = f"{validated_prefix}-metrics"
+
+    filelog_block = ""
+    filelog_receiver_ref = ""
+    if enable_filelog:
+        filelog_block = f"""
+  filelog:
+    include: [{_yaml_scalar(filelog_path)}]
+    start_at: end
+    operators:
+      - type: json_parser
+        if: 'body matches "^\\\\{{"'
+"""
+        filelog_receiver_ref = ", filelog"
+
+    sampling_block = ""
+    sampling_processor_ref = ""
+    if 0.0 < sampling_ratio < 1.0:
+        sampling_block = f"""
+  probabilistic_sampler:
+    sampling_percentage: {sampling_ratio * 100:.1f}
+"""
+        sampling_processor_ref = ", probabilistic_sampler"
 
     return f"""receivers:
   otlp:
     protocols:
       grpc:
+        endpoint: "0.0.0.0:{grpc_port}"
       http:
+        endpoint: "0.0.0.0:{http_port}"
+{filelog_block}
+connectors:
+  spanmetrics:
+    histogram:
+      explicit:
+        boundaries: [10, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+    dimensions:
+      - name: service.name
+      - name: gen_ai.agent.tool_name
+      - name: gen_ai.agent.model_name
+      - name: event.outcome
 
 processors:
   memory_limiter:
@@ -105,27 +153,36 @@ processors:
     actions:
       - key: gen_ai.prompt
         action: delete
+      - key: gen_ai.completion
+        action: delete
       - key: gen_ai.tool.call.arguments
         action: delete
       - key: gen_ai.tool.call.result
         action: delete
-
+{sampling_block}
 exporters:
-  elasticsearch:
+  elasticsearch/events:
     endpoints: [{_yaml_scalar(es_url)}]{auth_lines}
     logs_index: {_yaml_scalar(events_alias)}
     traces_index: {_yaml_scalar(events_alias)}
+  elasticsearch/metrics:
+    endpoints: [{_yaml_scalar(es_url)}]{auth_lines}
+    metrics_index: {_yaml_scalar(metrics_index)}
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resource/runtime, attributes/redact, batch]
-      exporters: [elasticsearch]
+      processors: [memory_limiter, resource/runtime, attributes/redact{sampling_processor_ref}, batch]
+      exporters: [elasticsearch/events, spanmetrics]
     logs:
-      receivers: [otlp]
+      receivers: [otlp{filelog_receiver_ref}]
       processors: [memory_limiter, resource/runtime, attributes/redact, batch]
-      exporters: [elasticsearch]
+      exporters: [elasticsearch/events]
+    metrics:
+      receivers: [otlp, spanmetrics]
+      processors: [memory_limiter, resource/runtime, batch]
+      exporters: [elasticsearch/metrics]
 """
 
 
@@ -143,6 +200,11 @@ def main() -> int:
             es_user=args.es_user,
             es_password=args.es_password,
             embed_credentials=args.embed_es_credentials,
+            grpc_port=args.grpc_port,
+            http_port=args.http_port,
+            sampling_ratio=args.sampling_ratio,
+            enable_filelog=args.enable_filelog,
+            filelog_path=args.filelog_path,
         )
         write_text(output, rendered)
         print(f"✅ collector config written: {output}")

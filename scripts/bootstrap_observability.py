@@ -27,6 +27,7 @@ from generate_report import build_report, render_markdown, search_payload
 from render_collector_config import render_config
 from render_elastic_agent_assets import SUPPORTED_INGEST_MODES, render_assets as render_elastic_native_assets
 from render_es_assets import render_assets
+from render_instrument_snippet import render_snippet_to_file
 
 DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:4317"
 DEFAULT_COLLECTOR_BIN = "otelcol"
@@ -60,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fleet-server-url", default="")
     parser.add_argument("--fleet-enrollment-token", default="")
     parser.add_argument("--apm-server-url", default="")
+    parser.add_argument("--agent-id", default="", help="Optional agent identifier for multi-agent setups")
+    parser.add_argument("--generate-instrument-snippet", action="store_true", help="Generate a Python auto-instrumentation starter file")
     return parser.parse_args()
 
 
@@ -277,6 +280,17 @@ def main() -> int:
             index_prefix=index_prefix,
             retention_days=retention_days,
         )
+
+        instrument_snippet_path = None
+        if args.generate_instrument_snippet:
+            instrument_snippet_path = render_snippet_to_file(
+                discovery,
+                output_dir / "agent_otel_bootstrap.py",
+                service_name=args.service_name,
+                environment=args.environment,
+                otlp_endpoint=args.otlp_endpoint,
+                index_prefix=index_prefix,
+            )
 
         apply_summary_path = None
         es_config = ESConfig(

@@ -1,36 +1,66 @@
 # Config Guide
 
-## Target environments
+## Target Shape
 
 This repo is designed for:
 
 - self-hosted Elasticsearch 9.x
 - Tencent Cloud Elasticsearch Service 9.x
-- Kibana instances that can import or create saved objects through the standard API
+- Kibana instances that accept standard saved-object APIs
 
-## Main outputs
+## What The Bootstrap Leaves Behind
 
-The bootstrap flow should leave you with a working observability starter surface across three layers:
+The normal bootstrap path should leave:
 
-- OTel Collector config
+- Collector config
 - Collector launcher script
 - agent OTLP env template
 - Elasticsearch index template
 - ingest pipeline
 - ILM policy
+- report config
 - Kibana saved objects bundle
-- apply summary
-- optional smoke report output
+- optional apply summary
+- optional smoke report
 
-## Default assumptions
+## Workspace Rule
 
-- OpenTelemetry is the main ingestion path
-- Elasticsearch is the storage and analytics backend
-- Kibana is the main human-facing report surface
-- prompts and tool payloads should be redacted or summarized by default
-- generated assets should stay reviewable JSON / YAML / shell files, not hidden runtime state
+Point `--workspace` at the real agent code root.
 
-## Minimal bootstrap
+Do not rely on generated sample folders, test-only directories, or doc-heavy folders to represent the runtime.
+The current discovery pass already ignores common noise directories such as:
+
+- `generated/`
+- `references/`
+- `tests/`
+- `assets/`
+
+## Credential Rule
+
+Default path:
+
+- pass `--es-user` and `--es-password`
+- keep them out of YAML
+- let the generated Collector config reference env placeholders
+
+Only use `--embed-es-credentials` when the file can be treated as secret material.
+
+## Launcher Rule
+
+`run-collector.sh` now uses sibling-relative paths.
+That means the launcher, env file, and Collector YAML can move together as one bundle without rewriting absolute paths.
+
+## Time Field Contract
+
+`report-config.json` declares the reporting time field.
+Current default is:
+
+- `time_field = captured_at`
+
+The ingest pipeline now stamps `captured_at` from ingest time when upstream telemetry does not provide it.
+That keeps Kibana and the smoke report on the same time-field contract.
+
+## Minimal Bootstrap
 
 ```bash
 python scripts/bootstrap_observability.py \
@@ -42,19 +72,12 @@ python scripts/bootstrap_observability.py \
   --apply-kibana-assets
 ```
 
-## What this gives you
+## What This Does Not Guarantee
 
-At minimum, the command above should leave you with:
+This repo does not guarantee:
 
-- generated Collector config
-- generated Elasticsearch assets
-- applied template / pipeline / ILM policy
-- bootstrapped first write index alias
-- generated Kibana saved objects bundle
-- optionally applied Kibana saved objects
-- generated smoke report output for quick validation
+- auto-instrumentation of arbitrary agent code
+- perfect schema extraction from every telemetry source
+- a full dashboard pack in Kibana
 
-## Rule
-
-Prefer generated config and assets over hand-written setup notes.
-That keeps the repo deterministic, publishable, and easier to automate.
+Treat it as a strong Elastic-side starter, not as the whole runtime plane.

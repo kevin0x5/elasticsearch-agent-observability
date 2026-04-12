@@ -1,44 +1,57 @@
 # Reporting
 
-## Human-facing reporting surface
+## Primary Human Surface
 
-The primary human-facing reporting surface for this repo should be **Kibana**.
+The primary human-facing surface is **Kibana**.
 
-That means the repo should prepare:
+In the current version, that specifically means:
 
-- a data view / index pattern for agent observability events
-- a saved search or other directly usable Kibana objects
-- an asset bundle that can be imported or applied automatically
+- a data view / index pattern
+- a saved search entry surface
+- an asset bundle that can be applied or imported
 
-## Smoke and machine outputs
+That is a usable Kibana starting point.
+It is not yet a full dashboard suite.
 
-The repo still supports:
+## Smoke And Machine Outputs
+
+The repo also supports:
 
 - Markdown reports for quick smoke validation
-- JSON reports for automation or follow-up processing
+- JSON reports for automation
 
-But these are supporting outputs.
-They are not the main long-term UI story.
+These outputs are supporting surfaces.
+They are not the long-term UI story.
 
-## Default metric focus
+## Current Metric Set
 
-The initial report surface focuses on:
+Keep the reporting language aligned with what the repo really emits today:
 
 - success rate
-- p50 / p95 latency
+- p50 latency
+- p95 latency
 - tool error rate
-- retry / timeout breakdown
-- token / cost totals
+- retry total
+- token input total
+- token output total
+- cost total
 - top tools
 - top models
-- MCP method breakdown
+- MCP methods
+- error types
 
-## Why these first
+Do not claim retry breakdown or timeout breakdown unless the implementation actually emits them.
 
-These metrics answer the first operational questions quickly:
+## Time Field Contract
 
-- is the agent healthy
-- where is it slow
-- which tools fail most often
-- is retry pressure rising
-- which models cost the most
+`report-config.json` defines the reporting time field.
+Current default:
+
+- `captured_at`
+
+Both the smoke report query and the Kibana entry surface should follow the same time-field contract.
+
+## Practical Rule
+
+If Markdown and Kibana disagree, fix the shared config and ingest contract first.
+Do not let the repo drift into one time field for smoke output and another for Kibana.

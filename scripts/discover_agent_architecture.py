@@ -11,19 +11,14 @@ from typing import Any
 
 from common import SkillError, iter_text_files, normalize_text, print_error, read_text_file, safe_relative, utcnow_iso, write_json
 
-
-# Pre-compiled word-boundary patterns for content keyword matching to reduce false positives.
-# Path keywords stay as substring matches (reasonable for file paths).
-_CONTENT_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+_CONTENT_PATTERN_CACHE: dict[str, re.Pattern[str] | None] = {}
 
 
 def _content_match(keyword: str, text: str) -> bool:
-    """Match a content keyword with word boundaries to avoid 'model' matching 'data_model' etc."""
     pattern = _CONTENT_PATTERN_CACHE.get(keyword)
-    if pattern is None:
-        # For multi-word / punctuated keywords like 'if __name__ == "__main__"', use plain `in`
-        if any(ch in keyword for ch in (' ', '(', '_', '/', '.')):
-            _CONTENT_PATTERN_CACHE[keyword] = None  # type: ignore[assignment]
+    if pattern is None and keyword not in _CONTENT_PATTERN_CACHE:
+        if any(ch in keyword for ch in (" ", "(", "_", "/", ".", "-")):
+            _CONTENT_PATTERN_CACHE[keyword] = None
             return keyword in text
         escaped = re.escape(keyword)
         pattern = re.compile(rf"(?<![a-z0-9_]){escaped}(?![a-z0-9_])")
@@ -94,6 +89,24 @@ MODULE_RULES = {
         "content_keywords": ["trace", "telemetry", "metric", "observability", "otlp", "opentelemetry"],
         "signals": ["reuse_existing_telemetry"],
     },
+    "otel_sdk_surface": {
+        "priority": 87,
+        "path_keywords": ["otel", "opentelemetry"],
+        "content_keywords": ["otlp", "opentelemetry", "tracerprovider", "meterprovider", "otelloghandler"],
+        "signals": ["otlp_ingest", "otel_semantics", "trace_bridge"],
+    },
+    "elastic_apm": {
+        "priority": 86,
+        "path_keywords": ["apm", "elasticapm"],
+        "content_keywords": ["elasticapm", "elastic apm", "transaction", "capture_span", "apm server"],
+        "signals": ["apm_spans", "transactions", "errors"],
+    },
+    "elastic_agent": {
+        "priority": 84,
+        "path_keywords": ["elastic-agent", "fleet", "beats"],
+        "content_keywords": ["fleet", "elastic-agent", "enrollment token", "policy id"],
+        "signals": ["fleet_enrollment", "agent_policy", "host_metrics"],
+    },
 }
 
 
@@ -129,7 +142,7 @@ def build_architecture_style(module_kinds: list[str], command_handlers: list[str
     return "mixed agent workspace"
 
 
-def recommend_modules(detected_modules: list[dict]) -> list[dict]:
+def recommend_modules(detected_modules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     recommendations = []
     for module in detected_modules:
         recommendations.append(
@@ -142,6 +155,39 @@ def recommend_modules(detected_modules: list[dict]) -> list[dict]:
             }
         )
     recommendations.sort(key=lambda item: (-item["priority"], item["module_id"]))
+    return recommendations
+
+
+def recommend_ingest_modes(detected_modules: list[dict[str, Any]], recommended_signals: list[str]) -> list[dict[str, Any]]:
+    kinds = {module.get("module_kind") for module in detected_modules}
+    signals = set(recommended_signals)
+    recommendations = [
+        {
+            "mode": "collector",
+            "score": 0.94,
+            "why": "Safest default path. Works well when the runtime can emit OTLP without Elastic-native enrollment.",
+            "prerequisites": ["OTLP endpoint reachable", "Collector binary available"],
+        }
+    ]
+    if {"existing_observability", "otel_sdk_surface", "elastic_apm"} & kinds or {"otlp_ingest", "trace_bridge"} & signals:
+        recommendations.append(
+            {
+                "mode": "apm-otlp-hybrid",
+                "score": 0.88,
+                "why": "Best fit when the workspace already speaks OTLP or APM and you want Elastic-native semantics without dropping Collector support.",
+                "prerequisites": ["APM endpoint or Fleet policy available", "OTLP exporter or SDK hooks present"],
+            }
+        )
+    if {"runtime_entrypoint", "tool_registry", "elastic_agent"} & kinds:
+        recommendations.append(
+            {
+                "mode": "elastic-agent-fleet",
+                "score": 0.82,
+                "why": "Best fit when operators prefer managed enrollment, host telemetry, and Fleet-governed policies.",
+                "prerequisites": ["Fleet Server available", "Enrollment token available"],
+            }
+        )
+    recommendations.sort(key=lambda item: (-item["score"], item["mode"]))
     return recommendations
 
 
@@ -177,9 +223,10 @@ def discover_workspace(workspace: Path, max_files: int = 400) -> dict[str, Any]:
                 },
             )
             module["score"] += score
-            if safe_relative(path, workspace) not in module["evidence_files"]:
-                module["evidence_files"].append(safe_relative(path, workspace))
-            evidence_by_kind[module_kind].append(safe_relative(path, workspace))
+            relative = safe_relative(path, workspace)
+            if relative not in module["evidence_files"]:
+                module["evidence_files"].append(relative)
+            evidence_by_kind[module_kind].append(relative)
             all_signals.update(rule["signals"])
 
     if command_handlers:
@@ -195,6 +242,7 @@ def discover_workspace(workspace: Path, max_files: int = 400) -> dict[str, Any]:
         all_signals.update(["command_calls", "command_errors", "command_latency"])
 
     detected_modules = sorted(aggregate.values(), key=lambda item: (-item["priority"], -item["score"]))
+    recommended_signals = sorted(all_signals)
     payload = {
         "workspace": str(workspace),
         "generated_at": utcnow_iso(),
@@ -203,7 +251,8 @@ def discover_workspace(workspace: Path, max_files: int = 400) -> dict[str, Any]:
         "detected_modules": detected_modules,
         "command_handlers": sorted(set(command_handlers)),
         "recommended_monitoring_plan": recommend_modules(detected_modules),
-        "recommended_signals": sorted(all_signals),
+        "recommended_signals": recommended_signals,
+        "recommended_ingest_modes": recommend_ingest_modes(detected_modules, recommended_signals),
     }
     return payload
 

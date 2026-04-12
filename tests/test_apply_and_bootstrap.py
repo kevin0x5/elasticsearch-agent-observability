@@ -97,8 +97,8 @@ class ApplyAndBootstrapTests(unittest.TestCase):
         )
         self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317", env_text)
         self.assertIn("OTEL_SERVICE_NAME=agent-runtime", env_text)
-        self.assertIn('source "/tmp/agent-otel.env"', launcher)
-        self.assertIn('--config "/tmp/otel-collector.generated.yaml"', launcher)
+        self.assertIn('source "$SCRIPT_DIR/agent-otel.env"', launcher)
+        self.assertIn('--config "$SCRIPT_DIR/otel-collector.generated.yaml"', launcher)
 
 
 if __name__ == "__main__":

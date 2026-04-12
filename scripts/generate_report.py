@@ -33,10 +33,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def search_payload(time_range: str) -> dict[str, Any]:
+def search_payload(time_range: str, time_field: str = "captured_at") -> dict[str, Any]:
     return {
         "size": 0,
-        "query": {"range": {"captured_at": {"gte": time_range}}},
+        "query": {"range": {time_field: {"gte": time_range}}},
         "aggs": {
             "with_errors": {"filter": {"exists": {"field": "error_type"}}},
             "tool_calls": {"filter": {"exists": {"field": "tool_name"}}},
@@ -132,20 +132,21 @@ def main() -> int:
         credentials = validate_credential_pair(args.es_user, args.es_password)
         index_prefix = validate_index_prefix(config.get("index_prefix", "agent-obsv"))
         events_alias = str(config.get("events_alias") or build_events_alias(index_prefix)).strip()
+        time_field = str(config.get("time_field") or "captured_at").strip() or "captured_at"
         time_range = args.time_range if args.time_range != "now-24h" else config.get("time_range", "now-24h")
         es_config = ESConfig(
             es_url=args.es_url,
             es_user=credentials[0] if credentials else None,
             es_password=credentials[1] if credentials else None,
         )
-        result = es_request(es_config, "POST", f"/{events_alias}/_search", search_payload(time_range))
+        result = es_request(es_config, "POST", f"/{events_alias}/_search", search_payload(time_range, time_field=time_field))
         report = build_report(result)
         output = Path(args.output).expanduser().resolve()
         output_format = args.format or ("json" if output.suffix.lower() == ".json" else "markdown")
         if output_format == "json":
             write_json(output, report)
         else:
-            write_text(output, render_markdown(report, {**config, "time_range": time_range, "events_alias": events_alias}))
+            write_text(output, render_markdown(report, {**config, "time_range": time_range, "events_alias": events_alias, "time_field": time_field}))
         print(f"✅ report written: {output}")
         return 0
     except SkillError as exc:

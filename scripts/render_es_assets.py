@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 from common import (
     SkillError,
@@ -31,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_index_template(index_prefix: str, modules: list[str]) -> dict:
+def build_index_template(index_prefix: str, modules: list[str]) -> dict[str, Any]:
     events_alias = build_events_alias(index_prefix)
     return {
         "index_patterns": [f"{events_alias}-*"],
@@ -68,6 +69,7 @@ def build_index_template(index_prefix: str, modules: list[str]) -> dict:
                     "captured_at": {"type": "date"},
                     "agent.discovery.modules": {"type": "keyword"},
                     "labels.recommended_modules": {"type": "keyword"},
+                    "observer.ingest_error": {"type": "keyword"},
                 },
             },
         },
@@ -78,12 +80,13 @@ def build_index_template(index_prefix: str, modules: list[str]) -> dict:
     }
 
 
-def build_ingest_pipeline(modules: list[str]) -> dict:
+def build_ingest_pipeline(modules: list[str]) -> dict[str, Any]:
     return {
-        "description": "Normalize agent observability events and apply light redaction",
+        "description": "Normalize agent observability events, stamp captured_at, and apply light redaction",
         "processors": [
             {"set": {"field": "observer.product", "value": "elasticsearch-agent-observability"}},
             {"set": {"field": "labels.recommended_modules", "value": modules}},
+            {"set": {"field": "captured_at", "value": "{{{_ingest.timestamp}}}", "override": False}},
             {"remove": {"field": "gen_ai.prompt", "ignore_missing": True}},
             {"remove": {"field": "gen_ai.tool.call.arguments", "ignore_missing": True}},
             {"remove": {"field": "gen_ai.tool.call.result", "ignore_missing": True}},
@@ -94,7 +97,7 @@ def build_ingest_pipeline(modules: list[str]) -> dict:
     }
 
 
-def build_ilm_policy(retention_days: int) -> dict:
+def build_ilm_policy(retention_days: int) -> dict[str, Any]:
     return {
         "policy": {
             "phases": {
@@ -115,15 +118,78 @@ def build_ilm_policy(retention_days: int) -> dict:
     }
 
 
-def build_kibana_saved_objects(index_prefix: str) -> dict:
+def _search_source(data_view_id: str, query: str = "") -> dict[str, Any]:
+    return {
+        "indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index",
+        "query": {"language": "kuery", "query": query},
+        "filter": [],
+    }
+
+
+def build_search_saved_object(*, object_id: str, title: str, description: str, data_view_id: str, query: str = "") -> dict[str, Any]:
+    return {
+        "type": "search",
+        "id": object_id,
+        "attributes": {
+            "title": title,
+            "description": description,
+            "columns": DEFAULT_KIBANA_COLUMNS,
+            "sort": [["captured_at", "desc"]],
+            "grid": {},
+            "hideChart": False,
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps(_search_source(data_view_id, query), separators=(",", ":")),
+            },
+        },
+        "references": [
+            {
+                "id": data_view_id,
+                "name": "kibanaSavedObjectMeta.searchSourceJSON.index",
+                "type": "index-pattern",
+            }
+        ],
+    }
+
+
+def build_dashboard_saved_object(*, object_id: str, title: str, description: str, search_ids: list[str]) -> dict[str, Any]:
+    panels = []
+    references = []
+    for index, search_id in enumerate(search_ids):
+        ref_name = f"panel_{index}"
+        panels.append(
+            {
+                "version": "9.0.0",
+                "type": "search",
+                "panelIndex": str(index + 1),
+                "gridData": {"x": 0 if index == 0 else 24, "y": 0, "w": 24, "h": 15, "i": str(index + 1)},
+                "panelRefName": ref_name,
+                "embeddableConfig": {},
+            }
+        )
+        references.append({"type": "search", "name": ref_name, "id": search_id})
+    return {
+        "type": "dashboard",
+        "id": object_id,
+        "attributes": {
+            "title": title,
+            "description": description,
+            "panelsJSON": json.dumps(panels, separators=(",", ":")),
+            "optionsJSON": json.dumps({"useMargins": True, "syncColors": False, "syncCursor": True, "syncTooltips": True}, separators=(",", ":")),
+            "timeRestore": False,
+            "kibanaSavedObjectMeta": {
+                "searchSourceJSON": json.dumps({"query": {"language": "kuery", "query": ""}, "filter": []}, separators=(",", ":")),
+            },
+        },
+        "references": references,
+    }
+
+
+def build_kibana_saved_objects(index_prefix: str) -> dict[str, Any]:
     events_alias = build_events_alias(index_prefix)
     data_view_id = f"{index_prefix}-events-view"
     saved_search_id = f"{index_prefix}-event-stream"
-    search_source = {
-        "indexRefName": "kibanaSavedObjectMeta.searchSourceJSON.index",
-        "query": {"language": "kuery", "query": ""},
-        "filter": [],
-    }
+    failure_search_id = f"{index_prefix}-event-failures"
+    dashboard_id = f"{index_prefix}-overview"
     objects = [
         {
             "type": "index-pattern",
@@ -134,28 +200,26 @@ def build_kibana_saved_objects(index_prefix: str) -> dict:
                 "timeFieldName": "captured_at",
             },
         },
-        {
-            "type": "search",
-            "id": saved_search_id,
-            "attributes": {
-                "title": "Agent observability event stream",
-                "description": "Default Kibana Discover surface for agent observability events.",
-                "columns": DEFAULT_KIBANA_COLUMNS,
-                "sort": [["captured_at", "desc"]],
-                "grid": {},
-                "hideChart": False,
-                "kibanaSavedObjectMeta": {
-                    "searchSourceJSON": json.dumps(search_source, separators=(",", ":")),
-                },
-            },
-            "references": [
-                {
-                    "id": data_view_id,
-                    "name": "kibanaSavedObjectMeta.searchSourceJSON.index",
-                    "type": "index-pattern",
-                }
-            ],
-        },
+        build_search_saved_object(
+            object_id=saved_search_id,
+            title="Agent observability event stream",
+            description="Default Kibana Discover surface for agent observability events.",
+            data_view_id=data_view_id,
+            query="",
+        ),
+        build_search_saved_object(
+            object_id=failure_search_id,
+            title="Agent observability failures",
+            description="Starter search focused on failure and ingest-error events.",
+            data_view_id=data_view_id,
+            query="error_type:* or observer.ingest_error:*",
+        ),
+        build_dashboard_saved_object(
+            object_id=dashboard_id,
+            title="Agent observability overview",
+            description="Starter dashboard that pins the full event stream and failure stream side-by-side.",
+            search_ids=[saved_search_id, failure_search_id],
+        ),
     ]
     return {
         "space": "default",
@@ -163,41 +227,47 @@ def build_kibana_saved_objects(index_prefix: str) -> dict:
         "summary": {
             "data_view_id": data_view_id,
             "saved_search_id": saved_search_id,
+            "failure_search_id": failure_search_id,
+            "dashboard_id": dashboard_id,
             "events_alias_pattern": f"{events_alias}*",
+            "object_count": len(objects),
         },
     }
 
 
-def build_report_config(index_prefix: str, discovery: dict) -> dict:
-    modules = sorted({module["module_kind"] for module in discovery.get("detected_modules", [])})
+def build_report_config(index_prefix: str, discovery: dict[str, Any]) -> dict[str, Any]:
+    modules = sorted({module["module_kind"] for module in discovery.get("detected_modules", []) if module.get("module_kind")})
     kibana_bundle = build_kibana_saved_objects(index_prefix)
     return {
         "time_range": "now-24h",
+        "time_field": "captured_at",
         "index_prefix": index_prefix,
         "events_alias": build_events_alias(index_prefix),
         "recommended_modules": modules,
-        "human_surface": "kibana",
+        "human_surface": "kibana_dashboard",
         "kibana": kibana_bundle["summary"],
         "metrics": [
             "success_rate",
             "p50_latency_ms",
             "p95_latency_ms",
             "tool_error_rate",
-            "retry_breakdown",
-            "token_totals",
-            "cost_totals",
+            "retry_total",
+            "token_input_total",
+            "token_output_total",
+            "cost_total",
             "top_tools",
             "top_models",
-            "mcp_method_breakdown",
+            "mcp_methods",
+            "error_types",
         ],
     }
 
 
-def render_assets(discovery: dict, output_dir: Path, *, index_prefix: str, retention_days: int) -> dict:
+def render_assets(discovery: dict[str, Any], output_dir: Path, *, index_prefix: str, retention_days: int) -> dict[str, str]:
     ensure_dir(output_dir)
     validated_prefix = validate_index_prefix(index_prefix)
     validated_retention_days = validate_positive_int(retention_days, "Retention days")
-    modules = sorted({module["module_kind"] for module in discovery.get("detected_modules", [])})
+    modules = sorted({module["module_kind"] for module in discovery.get("detected_modules", []) if module.get("module_kind")})
     index_template = build_index_template(validated_prefix, modules)
     ingest_pipeline = build_ingest_pipeline(modules)
     ilm_policy = build_ilm_policy(validated_retention_days)

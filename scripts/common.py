@@ -22,6 +22,7 @@ TEXT_SUFFIXES = {
 }
 IGNORE_DIR_NAMES = {
     ".git", ".codebuddy", "node_modules", "vendor", "dist", "build", "coverage", "__pycache__", ".idea", ".vscode",
+    "generated", "references", "tests", "assets", ".pytest_cache",
 }
 INDEX_PREFIX_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._\-]{1,63}$")
 

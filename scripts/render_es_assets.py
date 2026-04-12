@@ -18,13 +18,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_index_template(index_prefix: str, modules: list[str]) -> dict:
+def build_index_template(index_prefix: str, modules: list[str], retention_days: int) -> dict:
     return {
         "index_patterns": [f"{index_prefix}-*-*"],
+        "priority": 200,
         "template": {
             "settings": {
                 "number_of_shards": 1,
                 "index.default_pipeline": f"{index_prefix}-normalize",
+                "index.lifecycle.name": f"{index_prefix}-lifecycle",
+                "index.lifecycle.rollover_alias": f"{index_prefix}-events",
             },
             "mappings": {
                 "dynamic": True,
@@ -74,7 +77,6 @@ def build_ingest_pipeline(index_prefix: str, modules: list[str]) -> dict:
         "on_failure": [
             {"set": {"field": "observer.ingest_error", "value": "{{ _ingest.on_failure_message }}"}}
         ],
-        "name": f"{index_prefix}-normalize",
     }
 
 
@@ -82,7 +84,14 @@ def build_ilm_policy(retention_days: int) -> dict:
     return {
         "policy": {
             "phases": {
-                "hot": {"actions": {}},
+                "hot": {
+                    "actions": {
+                        "rollover": {
+                            "max_age": "7d",
+                            "max_primary_shard_size": "25gb",
+                        }
+                    }
+                },
                 "delete": {
                     "min_age": f"{retention_days}d",
                     "actions": {"delete": {}},
@@ -94,7 +103,7 @@ def build_ilm_policy(retention_days: int) -> dict:
 
 def build_report_config(index_prefix: str, discovery: dict) -> dict:
     return {
-        "time_range": "24h",
+        "time_range": "now-24h",
         "index_prefix": index_prefix,
         "recommended_modules": [module["module_kind"] for module in discovery.get("detected_modules", [])],
         "metrics": [
@@ -115,7 +124,7 @@ def build_report_config(index_prefix: str, discovery: dict) -> dict:
 def render_assets(discovery: dict, output_dir: Path, *, index_prefix: str, retention_days: int) -> dict:
     ensure_dir(output_dir)
     modules = [module["module_kind"] for module in discovery.get("detected_modules", [])]
-    index_template = build_index_template(index_prefix, modules)
+    index_template = build_index_template(index_prefix, modules, retention_days)
     ingest_pipeline = build_ingest_pipeline(index_prefix, modules)
     ilm_policy = build_ilm_policy(retention_days)
     report_config = build_report_config(index_prefix, discovery)

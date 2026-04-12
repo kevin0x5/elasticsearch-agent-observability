@@ -1,35 +1,38 @@
 {
   "index_patterns": ["agent-obsv-*-*"],
+  "priority": 200,
   "template": {
     "settings": {
       "number_of_shards": 1,
-      "index.default_pipeline": "agent-obsv-normalize"
+      "index.default_pipeline": "agent-obsv-normalize",
+      "index.lifecycle.name": "agent-obsv-lifecycle",
+      "index.lifecycle.rollover_alias": "agent-obsv-events"
     },
     "mappings": {
       "dynamic": true,
       "properties": {
-        "agent_id": {"type": "keyword"},
-        "run_id": {"type": "keyword"},
-        "turn_id": {"type": "keyword"},
-        "span_id": {"type": "keyword"},
-        "parent_span_id": {"type": "keyword"},
-        "signal_type": {"type": "keyword"},
-        "semantic_kind": {"type": "keyword"},
-        "agent.module": {"type": "keyword"},
-        "agent.module_kind": {"type": "keyword"},
-        "tool_name": {"type": "keyword"},
-        "model_name": {"type": "keyword"},
-        "mcp_method_name": {"type": "keyword"},
-        "error_type": {"type": "keyword"},
-        "retry_count": {"type": "integer"},
-        "latency_ms": {"type": "float"},
-        "token_input": {"type": "long"},
-        "token_output": {"type": "long"},
-        "cost": {"type": "double"},
-        "session_id": {"type": "keyword"},
-        "captured_at": {"type": "date"},
-        "agent.discovery.modules": {"type": "keyword"},
-        "labels.recommended_modules": {"type": "keyword"}
+        "agent_id": { "type": "keyword" },
+        "run_id": { "type": "keyword" },
+        "turn_id": { "type": "keyword" },
+        "span_id": { "type": "keyword" },
+        "parent_span_id": { "type": "keyword" },
+        "signal_type": { "type": "keyword" },
+        "semantic_kind": { "type": "keyword" },
+        "agent.module": { "type": "keyword" },
+        "agent.module_kind": { "type": "keyword" },
+        "tool_name": { "type": "keyword" },
+        "model_name": { "type": "keyword" },
+        "mcp_method_name": { "type": "keyword" },
+        "error_type": { "type": "keyword" },
+        "retry_count": { "type": "integer" },
+        "latency_ms": { "type": "float" },
+        "token_input": { "type": "long" },
+        "token_output": { "type": "long" },
+        "cost": { "type": "double" },
+        "session_id": { "type": "keyword" },
+        "captured_at": { "type": "date" },
+        "agent.discovery.modules": { "type": "keyword" },
+        "labels.recommended_modules": { "type": "keyword" }
       }
     }
   },

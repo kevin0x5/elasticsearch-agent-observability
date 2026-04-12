@@ -12,6 +12,27 @@ from typing import Any
 from common import SkillError, iter_text_files, normalize_text, print_error, read_text_file, safe_relative, utcnow_iso, write_json
 
 
+# Pre-compiled word-boundary patterns for content keyword matching to reduce false positives.
+# Path keywords stay as substring matches (reasonable for file paths).
+_CONTENT_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def _content_match(keyword: str, text: str) -> bool:
+    """Match a content keyword with word boundaries to avoid 'model' matching 'data_model' etc."""
+    pattern = _CONTENT_PATTERN_CACHE.get(keyword)
+    if pattern is None:
+        # For multi-word / punctuated keywords like 'if __name__ == "__main__"', use plain `in`
+        if any(ch in keyword for ch in (' ', '(', '_', '/', '.')):
+            _CONTENT_PATTERN_CACHE[keyword] = None  # type: ignore[assignment]
+            return keyword in text
+        escaped = re.escape(keyword)
+        pattern = re.compile(rf"(?<![a-z0-9_]){escaped}(?![a-z0-9_])")
+        _CONTENT_PATTERN_CACHE[keyword] = pattern
+    if pattern is None:
+        return keyword in text
+    return bool(pattern.search(text))
+
+
 MODULE_RULES = {
     "agent_manifest": {
         "priority": 100,
@@ -90,7 +111,7 @@ def score_rule(path_text: str, content_text: str, rule: dict[str, Any]) -> int:
         if keyword in path_text:
             score += 5
     for keyword in rule["content_keywords"]:
-        if keyword in content_text:
+        if _content_match(keyword, content_text):
             score += 3
     return score
 
@@ -120,7 +141,7 @@ def recommend_modules(detected_modules: list[dict]) -> list[dict]:
                 "why": f"Detected from {len(module['evidence_files'])} evidence file(s) with score {module['score']}",
             }
         )
-    recommendations.sort(key=lambda item: (item["priority"], item["module_id"]), reverse=True)
+    recommendations.sort(key=lambda item: (-item["priority"], item["module_id"]))
     return recommendations
 
 
@@ -173,7 +194,7 @@ def discover_workspace(workspace: Path, max_files: int = 400) -> dict[str, Any]:
         }
         all_signals.update(["command_calls", "command_errors", "command_latency"])
 
-    detected_modules = sorted(aggregate.values(), key=lambda item: (item["priority"], item["score"]), reverse=True)
+    detected_modules = sorted(aggregate.values(), key=lambda item: (-item["priority"], -item["score"]))
     payload = {
         "workspace": str(workspace),
         "generated_at": utcnow_iso(),

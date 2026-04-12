@@ -118,14 +118,15 @@ def main() -> int:
         config = read_json(Path(args.config).expanduser().resolve())
         es_config = ESConfig(es_url=args.es_url, es_user=args.es_user, es_password=args.es_password)
         index_prefix = config.get("index_prefix", "agent-obsv")
-        result = es_request(es_config, "POST", f"/{index_prefix}-*/_search", search_payload(args.time_range))
+        time_range = args.time_range if args.time_range != "now-24h" else config.get("time_range", "now-24h")
+        result = es_request(es_config, "POST", f"/{index_prefix}-*/_search", search_payload(time_range))
         report = build_report(result)
         output = Path(args.output).expanduser().resolve()
         output_format = args.format or ("json" if output.suffix.lower() == ".json" else "markdown")
         if output_format == "json":
             write_json(output, report)
         else:
-            write_text(output, render_markdown(report, {**config, "time_range": args.time_range}))
+            write_text(output, render_markdown(report, {**config, "time_range": time_range}))
         print(f"✅ report written: {output}")
         return 0
     except SkillError as exc:

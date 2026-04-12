@@ -3,3 +3,10 @@ __pycache__/
 generated/*
 !generated/.gitkeep
 tmp/
+.DS_Store
+.venv/
+venv/
+.idea/
+.vscode/
+*.swp
+*~

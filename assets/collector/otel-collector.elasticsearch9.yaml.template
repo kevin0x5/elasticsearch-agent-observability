@@ -11,13 +11,16 @@ processors:
   batch:
     send_batch_size: 1024
     timeout: 5s
-  attributes/runtime:
-    actions:
+  resource/runtime:
+    attributes:
       - key: service.name
-        value: agent-runtime
+        value: "${SERVICE_NAME}"
         action: upsert
       - key: deployment.environment
-        value: dev
+        value: "${ENVIRONMENT}"
+        action: upsert
+      - key: agent.discovery.modules
+        value: "${MODULES}"
         action: upsert
       - key: observer.product
         value: elasticsearch-agent-observability
@@ -33,22 +36,19 @@ processors:
 
 exporters:
   elasticsearch:
-    endpoints: ["http://localhost:9200"]
-    logs_index: agent-obsv-events-default
-    metrics_index: agent-obsv-metrics-default
-    traces_index: agent-obsv-spans-default
+    endpoints: ["${ES_URL}"]
+    # user: "${ES_USER}"
+    # password: "${ES_PASSWORD}"
+    logs_index: "${INDEX_PREFIX}-events-default"
+    traces_index: "${INDEX_PREFIX}-spans-default"
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/runtime, attributes/redact, batch]
-      exporters: [elasticsearch]
-    metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, attributes/runtime, batch]
+      processors: [memory_limiter, resource/runtime, attributes/redact, batch]
       exporters: [elasticsearch]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/runtime, attributes/redact, batch]
+      processors: [memory_limiter, resource/runtime, attributes/redact, batch]
       exporters: [elasticsearch]

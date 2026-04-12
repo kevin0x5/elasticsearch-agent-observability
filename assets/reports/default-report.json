@@ -1,5 +1,5 @@
 {
-  "time_range": "24h",
+  "time_range": "now-24h",
   "index_prefix": "agent-obsv",
   "recommended_modules": [],
   "metrics": [

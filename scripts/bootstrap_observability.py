@@ -17,6 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--es-url", default="http://localhost:9200")
+    parser.add_argument("--es-user", default="")
+    parser.add_argument("--es-password", default="")
     parser.add_argument("--index-prefix", default="agent-obsv")
     parser.add_argument("--environment", default="dev")
     parser.add_argument("--service-name", default="agent-runtime")
@@ -55,6 +57,8 @@ def main() -> int:
             index_prefix=args.index_prefix,
             environment=args.environment,
             service_name=args.service_name,
+            es_user=args.es_user,
+            es_password=args.es_password,
         )
         write_text(collector_path, collector_text)
 

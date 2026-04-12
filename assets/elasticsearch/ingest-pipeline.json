@@ -8,6 +8,12 @@
       }
     },
     {
+      "set": {
+        "field": "labels.recommended_modules",
+        "value": []
+      }
+    },
+    {
       "remove": {
         "field": "gen_ai.prompt",
         "ignore_missing": true

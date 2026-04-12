@@ -1,0 +1,54 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+  attributes/runtime:
+    actions:
+      - key: service.name
+        value: agent-runtime
+        action: upsert
+      - key: deployment.environment
+        value: dev
+        action: upsert
+      - key: observer.product
+        value: elasticsearch-agent-observability
+        action: upsert
+  attributes/redact:
+    actions:
+      - key: gen_ai.prompt
+        action: delete
+      - key: gen_ai.tool.call.arguments
+        action: delete
+      - key: gen_ai.tool.call.result
+        action: delete
+
+exporters:
+  elasticsearch:
+    endpoints: ["http://localhost:9200"]
+    logs_index: agent-obsv-events-default
+    metrics_index: agent-obsv-metrics-default
+    traces_index: agent-obsv-spans-default
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/runtime, attributes/redact, batch]
+      exporters: [elasticsearch]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/runtime, batch]
+      exporters: [elasticsearch]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/runtime, attributes/redact, batch]
+      exporters: [elasticsearch]

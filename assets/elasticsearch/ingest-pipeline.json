@@ -1,0 +1,37 @@
+{
+  "description": "Normalize agent observability events and apply light redaction",
+  "processors": [
+    {
+      "set": {
+        "field": "observer.product",
+        "value": "elasticsearch-agent-observability"
+      }
+    },
+    {
+      "remove": {
+        "field": "gen_ai.prompt",
+        "ignore_missing": true
+      }
+    },
+    {
+      "remove": {
+        "field": "gen_ai.tool.call.arguments",
+        "ignore_missing": true
+      }
+    },
+    {
+      "remove": {
+        "field": "gen_ai.tool.call.result",
+        "ignore_missing": true
+      }
+    }
+  ],
+  "on_failure": [
+    {
+      "set": {
+        "field": "observer.ingest_error",
+        "value": "{{ _ingest.on_failure_message }}"
+      }
+    }
+  ]
+}

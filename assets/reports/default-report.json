@@ -1,0 +1,17 @@
+{
+  "time_range": "24h",
+  "index_prefix": "agent-obsv",
+  "recommended_modules": [],
+  "metrics": [
+    "success_rate",
+    "p50_latency_ms",
+    "p95_latency_ms",
+    "tool_error_rate",
+    "retry_breakdown",
+    "token_totals",
+    "cost_totals",
+    "top_tools",
+    "top_models",
+    "mcp_method_breakdown"
+  ]
+}

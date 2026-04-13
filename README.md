@@ -127,6 +127,35 @@ generated/bootstrap/
 └── bootstrap-summary.md
 ```
 
+## Running the Collector
+
+The generated launcher expects a working `otelcol-contrib` binary.
+Use one of these paths:
+
+- **Preferred**: use an already installed `otelcol-contrib`
+- **Safe local fallback**: download a pinned official `otelcol-contrib` release into a workspace-local tools directory and point `OTELCOL_BIN` at it
+- **Do not claim the Collector is running** if neither of those is true; switch to another ingest mode instead of pretending the collection layer is live
+
+A safe workspace-local launch looks like this:
+
+```bash
+mkdir -p tools/otelcol/0.102.1 generated/bootstrap/runtime
+curl -L -o tools/otelcol/0.102.1/otelcol-contrib.tar.gz <official-release-url>
+tar -xzf tools/otelcol/0.102.1/otelcol-contrib.tar.gz -C tools/otelcol/0.102.1
+OTELCOL_BIN="$PWD/tools/otelcol/0.102.1/otelcol-contrib" \
+  nohup generated/bootstrap/run-collector.sh \
+  > generated/bootstrap/runtime/collector.log 2>&1 &
+echo $! > generated/bootstrap/runtime/collector.pid
+```
+
+Operational minimums:
+
+- **Pin the version**: do not pull an unversioned "latest" binary
+- **Record provenance**: keep the release URL and checksum with the rollout notes
+- **Keep logs and PID**: background launch without a log file and PID file is not an operable setup
+- **Stop cleanly**: `kill "$(cat generated/bootstrap/runtime/collector.pid)"`
+- **Rollback cleanly**: remove the local binary path from `OTELCOL_BIN`, stop the process, and keep the generated config bundle for audit
+
 ## Requirements
 
 - Python 3.10+

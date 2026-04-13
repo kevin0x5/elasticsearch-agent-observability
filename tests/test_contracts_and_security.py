@@ -144,6 +144,15 @@ class ContractsAndSecurityTests(unittest.TestCase):
         self.assertGreaterEqual(bundle["summary"]["object_count"], 7)
         self.assertNotIn("alert_ids", bundle["summary"])
 
+    def test_kibana_objects_keep_meta_only_for_search_and_dashboard(self) -> None:
+        bundle = render_es_assets.build_kibana_saved_objects("agent-obsv")
+        for obj in bundle["objects"]:
+            attributes = obj.get("attributes", {})
+            if obj["type"] in {"search", "dashboard"}:
+                self.assertIn("kibanaSavedObjectMeta", attributes)
+            if obj["type"] == "lens":
+                self.assertNotIn("kibanaSavedObjectMeta", attributes)
+
     def test_report_config_uses_data_stream_and_timestamp(self) -> None:
         report_config = render_es_assets.build_report_config("agent-obsv", DISCOVERY_SAMPLE)
         self.assertEqual(report_config["time_field"], "@timestamp")

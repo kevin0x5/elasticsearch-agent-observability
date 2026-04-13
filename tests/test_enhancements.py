@@ -180,6 +180,15 @@ class DashboardExtensionsTests(unittest.TestCase):
         self.assertEqual(bundle_default["summary"]["object_count"], bundle_none["summary"]["object_count"])
         self.assertEqual(len(bundle_default["summary"]["lens_ids"]), 4)
 
+    def test_lens_objects_omit_kibana_saved_object_meta(self) -> None:
+        extensions = [
+            {"id": "mcp-methods", "field": "gen_ai.agent.mcp_method_name", "aggregation": "terms", "title": "Top MCP Methods"},
+        ]
+        bundle = render_es_assets.build_kibana_saved_objects("agent-obsv", extensions=extensions)
+        lens_objects = [obj for obj in bundle["objects"] if obj.get("type") == "lens"]
+        self.assertGreaterEqual(len(lens_objects), 5)
+        self.assertTrue(all("kibanaSavedObjectMeta" not in obj["attributes"] for obj in lens_objects))
+
     def test_sum_extension_creates_xy_chart(self) -> None:
         extensions = [
             {"id": "cost-trend", "field": "gen_ai.agent.cost", "aggregation": "sum", "title": "Cost Over Time"},

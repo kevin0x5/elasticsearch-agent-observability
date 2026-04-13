@@ -314,6 +314,20 @@ def build_search_saved_object(*, object_id: str, title: str, description: str, d
     }
 
 
+def build_lens_saved_object(*, object_id: str, title: str, description: str, visualization_type: str, state: dict[str, Any], data_view_id: str) -> dict[str, Any]:
+    return {
+        "type": "lens",
+        "id": object_id,
+        "attributes": {
+            "title": title,
+            "description": description,
+            "visualizationType": visualization_type,
+            "state": state,
+        },
+        "references": [{"id": data_view_id, "type": "index-pattern", "name": "indexpattern-datasource-layer-layer1"}],
+    }
+
+
 def _build_lens_event_rate_visualization(*, object_id: str, data_view_id: str) -> dict[str, Any]:
     """Lens XY chart: event count over time, broken down by event.outcome."""
     state = {
@@ -330,18 +344,14 @@ def _build_lens_event_rate_visualization(*, object_id: str, data_view_id: str) -
             },
         },
     }
-    return {
-        "type": "lens",
-        "id": object_id,
-        "attributes": {
-            "title": "Agent event rate",
-            "description": "Event volume over time, split by success/failure.",
-            "visualizationType": "lnsXY",
-            "state": state,
-            "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps({"query": {"language": "kuery", "query": ""}, "filter": []}, separators=(",", ":"))},
-        },
-        "references": [{"id": data_view_id, "type": "index-pattern", "name": "indexpattern-datasource-layer-layer1"}],
-    }
+    return build_lens_saved_object(
+        object_id=object_id,
+        title="Agent event rate",
+        description="Event volume over time, split by success/failure.",
+        visualization_type="lnsXY",
+        state=state,
+        data_view_id=data_view_id,
+    )
 
 
 def _build_lens_latency_percentiles(*, object_id: str, data_view_id: str) -> dict[str, Any]:
@@ -359,18 +369,14 @@ def _build_lens_latency_percentiles(*, object_id: str, data_view_id: str) -> dic
             },
         },
     }
-    return {
-        "type": "lens",
-        "id": object_id,
-        "attributes": {
-            "title": "Agent latency P50 / P95",
-            "description": "P50 and P95 event.duration.",
-            "visualizationType": "lnsMetric",
-            "state": state,
-            "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps({"query": {"language": "kuery", "query": ""}, "filter": []}, separators=(",", ":"))},
-        },
-        "references": [{"id": data_view_id, "type": "index-pattern", "name": "indexpattern-datasource-layer-layer1"}],
-    }
+    return build_lens_saved_object(
+        object_id=object_id,
+        title="Agent latency P50 / P95",
+        description="P50 and P95 event.duration.",
+        visualization_type="lnsMetric",
+        state=state,
+        data_view_id=data_view_id,
+    )
 
 
 def _build_lens_top_tools(*, object_id: str, data_view_id: str) -> dict[str, Any]:
@@ -388,18 +394,14 @@ def _build_lens_top_tools(*, object_id: str, data_view_id: str) -> dict[str, Any
             },
         },
     }
-    return {
-        "type": "lens",
-        "id": object_id,
-        "attributes": {
-            "title": "Top tools by call count",
-            "description": "Pie chart of most-called agent tools.",
-            "visualizationType": "lnsPie",
-            "state": state,
-            "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps({"query": {"language": "kuery", "query": ""}, "filter": []}, separators=(",", ":"))},
-        },
-        "references": [{"id": data_view_id, "type": "index-pattern", "name": "indexpattern-datasource-layer-layer1"}],
-    }
+    return build_lens_saved_object(
+        object_id=object_id,
+        title="Top tools by call count",
+        description="Pie chart of most-called agent tools.",
+        visualization_type="lnsPie",
+        state=state,
+        data_view_id=data_view_id,
+    )
 
 
 def _build_lens_token_usage(*, object_id: str, data_view_id: str) -> dict[str, Any]:
@@ -418,18 +420,14 @@ def _build_lens_token_usage(*, object_id: str, data_view_id: str) -> dict[str, A
             },
         },
     }
-    return {
-        "type": "lens",
-        "id": object_id,
-        "attributes": {
-            "title": "Token usage over time",
-            "description": "Input vs output token consumption per time bucket.",
-            "visualizationType": "lnsXY",
-            "state": state,
-            "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps({"query": {"language": "kuery", "query": ""}, "filter": []}, separators=(",", ":"))},
-        },
-        "references": [{"id": data_view_id, "type": "index-pattern", "name": "indexpattern-datasource-layer-layer1"}],
-    }
+    return build_lens_saved_object(
+        object_id=object_id,
+        title="Token usage over time",
+        description="Input vs output token consumption per time bucket.",
+        visualization_type="lnsXY",
+        state=state,
+        data_view_id=data_view_id,
+    )
 
 
 def _build_alert_rule(*, object_id: str, data_view_id: str, index_prefix: str) -> dict[str, Any]:
@@ -581,27 +579,23 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
         else:
             continue
 
-        lens_obj = {
-            "type": "lens",
-            "id": ext_id,
-            "attributes": {
-                "title": title,
-                "description": ext.get("description", f"Custom panel for {source_field}"),
-                "visualizationType": viz_type,
-                "state": {
-                    "visualization": {
-                        "title": title,
-                        "visualizationType": viz_type,
-                        "state": {
-                            "datasourceStates": {"formBased": {"layers": {"layer1": {"columns": columns, "columnOrder": list(columns.keys())}}}},
-                            "visualization": viz_config,
-                        },
+        lens_obj = build_lens_saved_object(
+            object_id=ext_id,
+            title=title,
+            description=ext.get("description", f"Custom panel for {source_field}"),
+            visualization_type=viz_type,
+            state={
+                "visualization": {
+                    "title": title,
+                    "visualizationType": viz_type,
+                    "state": {
+                        "datasourceStates": {"formBased": {"layers": {"layer1": {"columns": columns, "columnOrder": list(columns.keys())}}}},
+                        "visualization": viz_config,
                     },
                 },
-                "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps({"query": {"language": "kuery", "query": ""}, "filter": []}, separators=(",", ":"))},
             },
-            "references": [{"id": data_view_id, "type": "index-pattern", "name": "indexpattern-datasource-layer-layer1"}],
-        }
+            data_view_id=data_view_id,
+        )
         objects.append(lens_obj)
         dashboard_panels.append({"id": ext_id, "type": "lens", "width": str(ext.get("width", 24)), "height": str(ext.get("height", 12))})
         extra_lens_ids.append(ext_id)

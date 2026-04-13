@@ -95,8 +95,9 @@ def setup(
         pass  # Log export is optional
 
 
-# Auto-setup on import
-setup()
+# Auto-setup on import (set AGENT_OTEL_AUTO_SETUP=false to disable)
+if os.environ.get("AGENT_OTEL_AUTO_SETUP", "true").lower() not in ("0", "false", "no", "off"):
+    setup()
 '''
 
 _TOOL_WRAPPER = '''
@@ -270,7 +271,8 @@ def _auto_patch():
         pass
 
 
-_auto_patch()
+if os.environ.get("AGENT_OTEL_AUTO_SETUP", "true").lower() not in ("0", "false", "no", "off"):
+    _auto_patch()
 '''
 
 

@@ -99,5 +99,73 @@
       "gen_ai.tool.call.arguments",
       "gen_ai.tool.call.result"
     ]
+  },
+  {
+    "_comment": "Guardrail safety check event — component_type tagging",
+    "input": {
+      "@timestamp": "2026-04-01T12:10:00Z",
+      "event.action": "guardrail_check",
+      "event.outcome": "success",
+      "service.name": "agent-runtime",
+      "gen_ai.agent.component_type": "guardrail",
+      "gen_ai.guardrail.action": "block",
+      "gen_ai.guardrail.rule_id": "prompt-injection-v1",
+      "gen_ai.guardrail.category": "prompt_injection",
+      "gen_ai.guardrail.latency_ms": 12.5,
+      "message": "guardrail blocked prompt injection"
+    },
+    "expected_after_pipeline": {
+      "gen_ai.agent.component_type": "guardrail",
+      "gen_ai.guardrail.action": "block",
+      "gen_ai.guardrail.category": "prompt_injection",
+      "event.outcome": "success",
+      "observer.product": "elasticsearch-agent-observability"
+    }
+  },
+  {
+    "_comment": "Evaluation result event",
+    "input": {
+      "@timestamp": "2026-04-01T12:15:00Z",
+      "event.action": "evaluation_result",
+      "event.outcome": "success",
+      "service.name": "agent-runtime",
+      "gen_ai.agent.component_type": "runtime",
+      "gen_ai.evaluation.run_id": "eval-run-001",
+      "gen_ai.evaluation.evaluator": "quality-checker-v2",
+      "gen_ai.evaluation.score": 0.92,
+      "gen_ai.evaluation.outcome": "pass",
+      "gen_ai.evaluation.dimension": "quality",
+      "message": "evaluation passed"
+    },
+    "expected_after_pipeline": {
+      "gen_ai.evaluation.run_id": "eval-run-001",
+      "gen_ai.evaluation.score": 0.92,
+      "gen_ai.evaluation.outcome": "pass",
+      "event.outcome": "success",
+      "observer.product": "elasticsearch-agent-observability"
+    }
+  },
+  {
+    "_comment": "Knowledge base retrieval event",
+    "input": {
+      "@timestamp": "2026-04-01T12:20:00Z",
+      "event.action": "knowledge_retrieval",
+      "event.outcome": "success",
+      "service.name": "agent-runtime",
+      "gen_ai.agent.component_type": "knowledge",
+      "gen_ai.agent.retrieval_latency_ms": 45.2,
+      "gen_ai.agent.cache_hit": false,
+      "gen_ai.agent.retrieval_score": 0.87,
+      "gen_ai.agent.knowledge_source": "product-docs-v3",
+      "message": "knowledge retrieval completed"
+    },
+    "expected_after_pipeline": {
+      "gen_ai.agent.component_type": "knowledge",
+      "gen_ai.agent.retrieval_latency_ms": 45.2,
+      "gen_ai.agent.cache_hit": false,
+      "gen_ai.agent.knowledge_source": "product-docs-v3",
+      "event.outcome": "success",
+      "observer.product": "elasticsearch-agent-observability"
+    }
   }
 ]

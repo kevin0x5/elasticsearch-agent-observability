@@ -33,6 +33,11 @@ EVENTS_DATA_STREAM = {events_data_stream!r}
 BRIDGE_HOST = {bind_host!r}
 BRIDGE_PORT = {bind_port}
 VERIFY_TLS = {verify_tls_literal}
+MAX_BODY_SIZE = 50 * 1024 * 1024  # 50 MB — reject oversized payloads to prevent DoS
+
+# Sensitive GenAI fields that should be stripped before writing to ES.
+# The ingest pipeline also removes these, but defence-in-depth is safer.
+_REDACT_KEYS = {{"gen_ai.prompt", "gen_ai.completion", "gen_ai.tool.call.arguments", "gen_ai.tool.call.result"}}
 
 
 class BridgeServer(ThreadingHTTPServer):
@@ -113,10 +118,13 @@ def _signal_blocks(payload: dict[str, Any], signal: str) -> list[dict[str, Any]]
 
 def _decode_payload(body: bytes, *, signal: str, content_type: str) -> dict[str, Any]:
     lowered = content_type.lower()
-    if "application/json" in lowered or body.lstrip().startswith(b"{{"):
+    if "application/json" in lowered:
         return json.loads(body.decode("utf-8"))
     if "application/x-protobuf" in lowered or "application/octet-stream" in lowered:
         return _decode_protobuf_payload(body, signal=signal)
+    # No explicit content-type — fall back to body sniffing.
+    if not lowered.strip() and body.lstrip().startswith(b"{{"):
+        return json.loads(body.decode("utf-8"))
     raise ValueError(f"Unsupported OTLP content type: {{content_type or 'unknown'}}")
 
 
@@ -149,7 +157,7 @@ def _coerce_message(value: Any) -> str:
 
 def _apply_attributes(document: dict[str, Any], attributes: dict[str, Any]) -> None:
     for key, value in attributes.items():
-        if not key or value is None or key in document:
+        if not key or value is None or key in document or key in _REDACT_KEYS:
             continue
         document[key] = value
 
@@ -364,6 +372,9 @@ class OTLPBridgeHandler(BaseHTTPRequestHandler):
             return
         signal = "logs" if route.endswith("logs") else "traces"
         content_length = int(self.headers.get("Content-Length", "0") or "0")
+        if content_length > MAX_BODY_SIZE:
+            self._write_json(413, {{"error": f"payload too large ({{content_length}} bytes, max {{MAX_BODY_SIZE}})" }})
+            return
         body = self.rfile.read(content_length)
         try:
             payload = _decode_payload(body, signal=signal, content_type=self.headers.get("Content-Type", ""))

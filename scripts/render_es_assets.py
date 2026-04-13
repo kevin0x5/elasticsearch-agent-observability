@@ -393,8 +393,8 @@ def _build_lens_latency_percentiles(*, object_id: str, data_view_id: str) -> dic
     state = _build_lens_state(
         columns={
             "col-x": {"operationType": "date_histogram", "sourceField": "@timestamp", "params": {"interval": "auto"}},
-            "col-p50": {"operationType": "percentile", "sourceField": "event.duration", "params": {"percentile": 50}, "label": "P50 duration (ns)"},
-            "col-p95": {"operationType": "percentile", "sourceField": "event.duration", "params": {"percentile": 95}, "label": "P95 duration (ns)"},
+            "col-p50": {"operationType": "percentile", "sourceField": "event.duration", "params": {"percentile": 50}, "label": "P50 duration (ns → divide by 1e6 for ms)"},
+            "col-p95": {"operationType": "percentile", "sourceField": "event.duration", "params": {"percentile": 95}, "label": "P95 duration (ns → divide by 1e6 for ms)"},
         },
         column_order=["col-x", "col-p50", "col-p95"],
         visualization={
@@ -512,6 +512,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
     lens_latency_id = f"{index_prefix}-lens-latency"
     lens_top_tools_id = f"{index_prefix}-lens-top-tools"
     lens_token_usage_id = f"{index_prefix}-lens-token-usage"
+    lens_component_type_id = f"{index_prefix}-lens-component-type"
 
     objects: list[dict[str, Any]] = [
         {
@@ -540,6 +541,24 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
         _build_lens_latency_percentiles(object_id=lens_latency_id, data_view_id=data_view_id),
         _build_lens_top_tools(object_id=lens_top_tools_id, data_view_id=data_view_id),
         _build_lens_token_usage(object_id=lens_token_usage_id, data_view_id=data_view_id),
+        build_lens_saved_object(
+            object_id=lens_component_type_id,
+            title="Events by component type",
+            description="Breakdown by gen_ai.agent.component_type (runtime / tool / llm / mcp / memory / knowledge / guardrail).",
+            visualization_type="lnsPie",
+            state=_build_lens_state(
+                columns={
+                    "col-slice": {"operationType": "terms", "sourceField": "gen_ai.agent.component_type", "params": {"size": 10}},
+                    "col-metric": {"operationType": "count", "label": "Events"},
+                },
+                column_order=["col-slice", "col-metric"],
+                visualization={
+                    "shape": "pie",
+                    "layers": [{"layerId": DEFAULT_LENS_LAYER_ID, "primaryGroups": ["col-slice"], "metric": "col-metric"}],
+                },
+            ),
+            data_view_id=data_view_id,
+        ),
     ]
 
     dashboard_panels = [
@@ -547,6 +566,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
         {"id": lens_latency_id, "type": "lens", "width": "24", "height": "12"},
         {"id": lens_top_tools_id, "type": "lens", "width": "24", "height": "12"},
         {"id": lens_token_usage_id, "type": "lens", "width": "24", "height": "12"},
+        {"id": lens_component_type_id, "type": "lens", "width": "24", "height": "12"},
         {"id": saved_search_id, "type": "search", "width": "24", "height": "15"},
         {"id": failure_search_id, "type": "search", "width": "24", "height": "15"},
     ]
@@ -615,7 +635,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
             "saved_search_id": saved_search_id,
             "failure_search_id": failure_search_id,
             "dashboard_id": dashboard_id,
-            "lens_ids": [lens_event_rate_id, lens_latency_id, lens_top_tools_id, lens_token_usage_id] + extra_lens_ids,
+            "lens_ids": [lens_event_rate_id, lens_latency_id, lens_top_tools_id, lens_token_usage_id, lens_component_type_id] + extra_lens_ids,
             "events_alias_pattern": f"{ds_name}*",
             "object_count": len(objects),
         },

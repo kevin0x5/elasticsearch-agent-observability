@@ -28,8 +28,20 @@ Before rendering config, it tries to infer what the agent actually contains:
 1. discover agent architecture
 2. map monitorable modules and signals
 3. render Collector config
-4. render Elasticsearch assets
-5. generate reports
+4. render Elasticsearch assets (templates, pipeline, ILM, Kibana objects)
+5. render OTLP HTTP bridge fallback (for when Collector ES exporter is blocked)
+6. render Elastic-native APM / RUM / profiling starter bundle
+7. render instrumentation snippet (Python auto-setup + monkey-patch)
+8. generate reports
+9. optionally apply assets to live ES / Kibana
+
+## Additional components
+
+- **Alert & diagnosis**: standalone cron-style check (`alert_and_diagnose.py`) for error rate spikes, latency degradation, and token anomalies. Outputs structured RCA.
+- **Knowledge archival**: diagnosis results can be piped into `elasticsearch-insight-store` for persistent RCA storage.
+- **Drift validation**: `validate_state.py` compares local generated assets against the live ES cluster and reports structural drift.
+- **Maturity scoring**: discovery computes a multi-dimensional maturity score (basic_logging, structured_telemetry, genai_instrumentation, operational_readiness) to guide upgrade paths.
+- **Dashboard extensions**: operators can supply external JSON/YAML panel declarations to extend the generated Kibana dashboard.
 
 ## Why this matters
 

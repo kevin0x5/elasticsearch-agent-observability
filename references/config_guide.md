@@ -12,19 +12,24 @@ This repo is designed for:
 
 The normal bootstrap path should leave:
 
-- Collector config
-- Collector launcher script
-- agent OTLP env template
-- Elasticsearch index template
-- ingest pipeline
-- ILM policy
-- report config
-- Kibana saved objects bundle
+- Collector config (`otel-collector.generated.yaml`)
+- Collector launcher script (`run-collector.sh`)
+- agent OTLP env template (`agent-otel.env`)
+- OTLP HTTP bridge script (`otlphttpbridge.py`)
+- bridge launcher script (`run-otlphttpbridge.sh`)
+- bridge env template (`agent-otel-bridge.env`)
+- Elasticsearch component templates (`component-template-ecs-base.json`, `component-template-settings.json`)
+- Elasticsearch index template (`index-template.json`)
+- ingest pipeline (`ingest-pipeline.json`)
+- ILM policy (`ilm-policy.json`)
+- report config (`report-config.json`)
+- Kibana saved objects bundle (`kibana-saved-objects.json`, `kibana-saved-objects.ndjson`)
 - Elastic-native APM / RUM / profiling starter bundle when using `elastic-agent-fleet` or `apm-otlp-hybrid`
-- optional Python instrumentation starter file
-- optional apply summary
+- optional Python instrumentation starter file (`agent_otel_bootstrap.py`)
+- optional apply summary (`apply-summary.json`)
 - optional sanity-check result
 - optional smoke report
+- bootstrap summary (`bootstrap-summary.md`)
 
 ## Workspace Rule
 

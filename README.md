@@ -111,7 +111,7 @@ python scripts/validate_state.py \
 ## Generated output
 
 ```text
-generated/bootstrap/
+generated/<output-dir>/                # default: generated/bootstrap
 ├── discovery.json
 ├── otel-collector.generated.yaml
 ├── run-collector.sh
@@ -206,9 +206,9 @@ kill "$(cat generated/bootstrap/runtime/otlphttpbridge.pid)"
 
 When the operator chooses `elastic-agent-fleet` or `apm-otlp-hybrid`, the generated `elastic-native/` bundle is no longer just a thin policy stub:
 
-- **APM / tracing**: `apm-agent.env` and `apm-entrypoints.md` point you at Kibana `Services`, `Traces`, and `Service Map`
-- **User experience monitoring**: `rum-agent-snippet.js` gives a direct starter for `@elastic/apm-rum`
-- **Performance profiling**: `profiling-starter.md` documents the rollout contract for Elastic Universal Profiling so host-level performance analysis is part of the plan
+- **APM / tracing**: `apm-agent.env`, `apm-entrypoints.md`, `surface-manifest.json`, and `trace-analysis-playbook.md` point you at Kibana `Services`, `Traces`, and `Service Map` instead of rebuilding trace analysis as custom dashboards
+- **User experience monitoring**: `rum-config.json`, `rum-agent-snippet.js`, and `ux-observability-playbook.md` give a direct starter for `@elastic/apm-rum` plus frontend/backend trace correlation
+- **Performance profiling**: `profiling-starter.md` documents the rollout contract for Elastic Universal Profiling so host-level performance analysis stays aligned with APM traces
 
 This still stays honest: the repo generates the starter assets and operating contract, but it does not auto-enroll Fleet, auto-patch frontend entrypoints, or auto-install the profiling agent for you.
 
@@ -217,7 +217,7 @@ This still stays honest: the repo generates the starter assets and operating con
 - Python 3.10+
 - Elasticsearch 9.x
 - Kibana 9.x
-- `otelcol-contrib` with `spanmetrics` and the Elasticsearch exporter
+- `otelcol-contrib` 0.87.0+ with `spanmetrics` connector and the Elasticsearch exporter
 - Basic license is enough
 
 ## Dependencies

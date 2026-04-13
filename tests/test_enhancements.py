@@ -23,6 +23,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import alert_and_diagnose  # noqa: E402
 import discover_agent_architecture  # noqa: E402
 import render_es_assets  # noqa: E402
+import render_instrument_snippet  # noqa: E402
 import validate_state  # noqa: E402
 from common import ESConfig, read_json  # noqa: E402
 
@@ -75,20 +76,43 @@ class ContractTestEvents(unittest.TestCase):
         self.assertEqual(observer_set[0]["value"], "elasticsearch-agent-observability")
 
     def test_all_expected_fields_have_matching_pipeline_logic(self) -> None:
-        """For each event, verify that expected_after_pipeline fields are reachable by pipeline logic."""
-        rename_map: dict[str, str] = {}
+        """For each event, verify that expected_after_pipeline fields exist in input or are set by pipeline."""
+        set_fields = set()
+        has_json_parser = False
         for proc in self.pipeline["processors"]:
-            if "rename" in proc:
-                rename_map[proc["rename"]["field"]] = proc["rename"]["target_field"]
+            if "set" in proc:
+                set_fields.add(proc["set"]["field"])
+            if "json" in proc:
+                has_json_parser = True
 
         for event in self.events:
             expected = event.get("expected_after_pipeline", {})
+            input_fields = set(event.get("input", {}).keys())
+            # If pipeline has a JSON parser and input has a "message" field with JSON body,
+            # fields inside that JSON body are also reachable.
+            json_body_fields: set[str] = set()
+            if has_json_parser:
+                import json as _json
+                msg = event.get("input", {}).get("message", "")
+                if isinstance(msg, str) and msg.strip().startswith("{"):
+                    try:
+                        def _flatten(obj: Any, prefix: str = "") -> set[str]:
+                            out: set[str] = set()
+                            if isinstance(obj, dict):
+                                for k, v in obj.items():
+                                    path = f"{prefix}.{k}" if prefix else k
+                                    out.add(path)
+                                    out |= _flatten(v, path)
+                            return out
+                        json_body_fields = _flatten(_json.loads(msg))
+                    except _json.JSONDecodeError:
+                        pass
+
             for key in expected:
-                if key in ("event.outcome", "observer.product"):
-                    continue
-                reverse_found = any(v == key for v in rename_map.values())
-                if not reverse_found:
-                    pass  # field may be native ECS, that's fine
+                self.assertTrue(
+                    key in input_fields or key in set_fields or key in json_body_fields,
+                    f"Expected field '{key}' not found in input, pipeline set, or JSON body fields",
+                )
 
 
 class MaturityScoreTests(unittest.TestCase):
@@ -174,7 +198,7 @@ class DashboardExtensionsTests(unittest.TestCase):
         bundle_default = render_es_assets.build_kibana_saved_objects("agent-obsv")
         bundle_none = render_es_assets.build_kibana_saved_objects("agent-obsv", extensions=None)
         self.assertEqual(bundle_default["summary"]["object_count"], bundle_none["summary"]["object_count"])
-        self.assertEqual(len(bundle_default["summary"]["lens_ids"]), 4)
+        self.assertEqual(len(bundle_default["summary"]["lens_ids"]), 5)
 
     def test_lens_objects_omit_kibana_saved_object_meta(self) -> None:
         extensions = [
@@ -294,6 +318,160 @@ class StoreToInsightTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertIn("store", calls[0])
         self.assertIn("--title", calls[0])
+
+
+class InstrumentSnippetTests(unittest.TestCase):
+    def test_render_snippet_is_valid_python(self) -> None:
+        discovery = {
+            "detected_modules": [
+                {"module_kind": "runtime_entrypoint"},
+                {"module_kind": "model_adapter"},
+                {"module_kind": "tool_registry"},
+            ],
+        }
+        snippet = render_instrument_snippet.render_instrument_snippet(
+            discovery,
+            service_name="test-agent",
+            environment="test",
+            otlp_endpoint="http://127.0.0.1:4317",
+            index_prefix="agent-obsv",
+        )
+        compile(snippet, "instrument-snippet", "exec")
+
+    def test_render_snippet_includes_auto_patch_when_model_adapter(self) -> None:
+        discovery = {"detected_modules": [{"module_kind": "model_adapter"}]}
+        snippet = render_instrument_snippet.render_instrument_snippet(
+            discovery,
+            service_name="test",
+            environment="dev",
+            otlp_endpoint="http://127.0.0.1:4317",
+            index_prefix="agent-obsv",
+        )
+        self.assertIn("_auto_patch", snippet)
+        self.assertIn("AGENT_OTEL_AUTO_SETUP", snippet)
+
+    def test_render_snippet_includes_tool_wrapper_when_tool_registry(self) -> None:
+        discovery = {"detected_modules": [{"module_kind": "tool_registry"}]}
+        snippet = render_instrument_snippet.render_instrument_snippet(
+            discovery,
+            service_name="test",
+            environment="dev",
+            otlp_endpoint="http://127.0.0.1:4317",
+            index_prefix="agent-obsv",
+        )
+        self.assertIn("traced_tool_call", snippet)
+        self.assertIn("traced_model_call", snippet)
+
+    def test_render_snippet_minimal_without_modules(self) -> None:
+        discovery = {"detected_modules": []}
+        snippet = render_instrument_snippet.render_instrument_snippet(
+            discovery,
+            service_name="test",
+            environment="dev",
+            otlp_endpoint="http://127.0.0.1:4317",
+            index_prefix="agent-obsv",
+        )
+        self.assertNotIn("_auto_patch", snippet)
+        self.assertNotIn("traced_tool_call", snippet)
+        self.assertIn("setup(", snippet)
+
+
+class AlertDiagnoseLogicTests(unittest.TestCase):
+    def _make_current(self, error_count: int = 0, total: int = 100, p95_ns: float = 0, tokens: float = 0) -> dict:
+        return {
+            "aggregations": {
+                "error_count": {"doc_count": error_count},
+                "total_events": {"value": total},
+                "p95_latency": {"values": {"95.0": p95_ns}},
+                "token_sum": {"value": tokens * 0.6},
+                "token_output_sum": {"value": tokens * 0.4},
+                "top_error_types": {"buckets": [{"key": "TimeoutError", "doc_count": error_count}]},
+                "top_error_tools": {"tools": {"buckets": [{"key": "web_search", "doc_count": error_count}]}},
+                "top_error_models": {"models": {"buckets": [{"key": "gpt-5", "doc_count": error_count}]}},
+                "top_token_tools": {"buckets": [{"key": "web_search", "token_sum": {"value": tokens}}]},
+                "top_token_models": {"buckets": [{"key": "gpt-5", "token_sum": {"value": tokens}}]},
+                "top_latency_tools": {"buckets": [{"key": "web_search", "doc_count": 10}]},
+            }
+        }
+
+    def _make_baseline(self, error_count: int = 2, total: int = 100, p95_ns: float = 1_000_000_000, tokens: float = 1000) -> dict:
+        return {
+            "aggregations": {
+                "error_count": {"doc_count": error_count},
+                "total_events": {"value": total},
+                "p95_latency": {"values": {"95.0": p95_ns}},
+                "token_sum": {"value": tokens * 0.6},
+                "token_output_sum": {"value": tokens * 0.4},
+            }
+        }
+
+    def test_error_spike_triggers(self) -> None:
+        result = alert_and_diagnose._analyze_error_spike(
+            self._make_current(error_count=20, total=100),
+            self._make_baseline(),
+            threshold=10,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["alert_type"], "error_rate_spike")
+
+    def test_error_spike_not_triggered_below_threshold(self) -> None:
+        result = alert_and_diagnose._analyze_error_spike(
+            self._make_current(error_count=5, total=100),
+            self._make_baseline(),
+            threshold=10,
+        )
+        self.assertIsNone(result)
+
+    def test_token_anomaly_triggers(self) -> None:
+        result = alert_and_diagnose._analyze_token_anomaly(
+            self._make_current(tokens=10000),
+            self._make_baseline(tokens=1000),
+            multiplier=3.0,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["alert_type"], "token_consumption_anomaly")
+
+    def test_latency_degradation_triggers(self) -> None:
+        result = alert_and_diagnose._analyze_latency_degradation(
+            self._make_current(p95_ns=10_000_000_000),  # 10s
+            self._make_baseline(p95_ns=1_000_000_000),
+            threshold_ms=5000,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["alert_type"], "latency_degradation")
+
+
+class ValidateStateExtendedTests(unittest.TestCase):
+    def test_deep_compare_partial_drift(self) -> None:
+        a = {"key1": "match", "key2": "local_val"}
+        b = {"key1": "match", "key2": "remote_val"}
+        diffs = validate_state._deep_compare(a, b)
+        self.assertEqual(len(diffs), 1)
+        self.assertEqual(diffs[0]["path"], "key2")
+        self.assertEqual(diffs[0]["type"], "value_mismatch")
+
+    def test_deep_compare_nested_partial_drift(self) -> None:
+        a = {"outer": {"inner": "local"}}
+        b = {"outer": {"inner": "remote", "extra": True}}
+        diffs = validate_state._deep_compare(a, b)
+        self.assertEqual(len(diffs), 1)
+        self.assertEqual(diffs[0]["path"], "outer.inner")
+
+    def test_validate_state_all_in_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            assets_dir = Path(tmp_dir)
+            (assets_dir / "ilm-policy.json").write_text('{"policy": {"phases": {"hot": {}}}}', encoding="utf-8")
+
+            def fake_es_request(config, method, path, payload=None):
+                return {"agent-obsv-lifecycle": {"policy": {"phases": {"hot": {}, "_meta": {"managed": True}}}}}
+
+            with mock.patch.object(validate_state, "es_request", side_effect=fake_es_request):
+                report = validate_state.validate_state(
+                    ESConfig(es_url="http://localhost:9200"),
+                    assets_dir=assets_dir,
+                    index_prefix="agent-obsv",
+                )
+        self.assertEqual(report["overall_status"], "in_sync")
 
 
 if __name__ == "__main__":

@@ -27,9 +27,19 @@ from common import (
 )
 
 DEFAULT_KIBANA_COLUMNS = [
-    "agent.id", "trace.id", "event.action", "service.name",
-    "gen_ai.agent.tool_name", "gen_ai.agent.model_name",
-    "event.duration", "event.outcome",
+    "@timestamp",
+    "gen_ai.agent.session_id",
+    "gen_ai.agent.run_id",
+    "gen_ai.agent.turn_id",
+    "gen_ai.agent.component_type",
+    "event.action",
+    "service.name",
+    "gen_ai.agent.tool_name",
+    "gen_ai.agent.model_name",
+    "gen_ai.agent.mcp_method_name",
+    "gen_ai.agent.latency_ms",
+    "event.outcome",
+    "gen_ai.agent.error_type",
 ]
 
 
@@ -323,7 +333,7 @@ def _lens_layer_reference_name(layer_id: str = DEFAULT_LENS_LAYER_ID) -> str:
     return f"indexpattern-datasource-layer-{layer_id}"
 
 
-def _build_lens_state(*, columns: dict[str, Any], column_order: list[str], visualization: dict[str, Any], layer_id: str = DEFAULT_LENS_LAYER_ID) -> dict[str, Any]:
+def _build_lens_state(*, columns: dict[str, Any], column_order: list[str], visualization: dict[str, Any], layer_id: str = DEFAULT_LENS_LAYER_ID, query: str = "") -> dict[str, Any]:
     return {
         "adHocDataViews": {},
         "datasourceStates": {
@@ -341,7 +351,7 @@ def _build_lens_state(*, columns: dict[str, Any], column_order: list[str], visua
         },
         "filters": [],
         "internalReferences": [],
-        "query": {"language": "kuery", "query": ""},
+        "query": {"language": "kuery", "query": query},
         "visualization": visualization,
     }
 
@@ -361,6 +371,39 @@ def build_lens_saved_object(*, object_id: str, title: str, description: str, vis
             {"id": data_view_id, "type": "index-pattern", "name": _lens_layer_reference_name()},
         ],
     }
+
+
+def _build_terms_pie_visualization(
+    *,
+    object_id: str,
+    data_view_id: str,
+    title: str,
+    description: str,
+    source_field: str,
+    metric_label: str,
+    size: int = 10,
+    query: str = "",
+) -> dict[str, Any]:
+    state = _build_lens_state(
+        columns={
+            "col-slice": {"operationType": "terms", "sourceField": source_field, "params": {"size": size}},
+            "col-metric": {"operationType": "count", "label": metric_label},
+        },
+        column_order=["col-slice", "col-metric"],
+        visualization={
+            "shape": "pie",
+            "layers": [{"layerId": DEFAULT_LENS_LAYER_ID, "primaryGroups": ["col-slice"], "metric": "col-metric"}],
+        },
+        query=query,
+    )
+    return build_lens_saved_object(
+        object_id=object_id,
+        title=title,
+        description=description,
+        visualization_type="lnsPie",
+        state=state,
+        data_view_id=data_view_id,
+    )
 
 
 def _build_lens_event_rate_visualization(*, object_id: str, data_view_id: str) -> dict[str, Any]:
@@ -415,24 +458,51 @@ def _build_lens_latency_percentiles(*, object_id: str, data_view_id: str) -> dic
 
 def _build_lens_top_tools(*, object_id: str, data_view_id: str) -> dict[str, Any]:
     """Lens pie: top tools by call count."""
-    state = _build_lens_state(
-        columns={
-            "col-slice": {"operationType": "terms", "sourceField": "gen_ai.agent.tool_name", "params": {"size": 10}},
-            "col-metric": {"operationType": "count", "label": "Calls"},
-        },
-        column_order=["col-slice", "col-metric"],
-        visualization={
-            "shape": "pie",
-            "layers": [{"layerId": DEFAULT_LENS_LAYER_ID, "primaryGroups": ["col-slice"], "metric": "col-metric"}],
-        },
-    )
-    return build_lens_saved_object(
+    return _build_terms_pie_visualization(
         object_id=object_id,
+        data_view_id=data_view_id,
         title="Top tools by call count",
         description="Pie chart of most-called agent tools.",
-        visualization_type="lnsPie",
-        state=state,
+        source_field="gen_ai.agent.tool_name",
+        metric_label="Calls",
+    )
+
+
+def _build_lens_top_sessions(*, object_id: str, data_view_id: str) -> dict[str, Any]:
+    """Lens pie: sessions with the most activity in the window."""
+    return _build_terms_pie_visualization(
+        object_id=object_id,
         data_view_id=data_view_id,
+        title="Top sessions by event volume",
+        description="Most active gen_ai.agent.session_id values in the selected time window.",
+        source_field="gen_ai.agent.session_id",
+        metric_label="Events",
+    )
+
+
+def _build_lens_failed_sessions(*, object_id: str, data_view_id: str) -> dict[str, Any]:
+    """Lens pie: sessions with failure concentration."""
+    return _build_terms_pie_visualization(
+        object_id=object_id,
+        data_view_id=data_view_id,
+        title="Failed sessions",
+        description="Failure-heavy sessions for fast conversation-level drilldown.",
+        source_field="gen_ai.agent.session_id",
+        metric_label="Failures",
+        query="event.outcome: failure and gen_ai.agent.session_id:*",
+    )
+
+
+def _build_lens_component_failures(*, object_id: str, data_view_id: str) -> dict[str, Any]:
+    """Lens pie: failing components by component type."""
+    return _build_terms_pie_visualization(
+        object_id=object_id,
+        data_view_id=data_view_id,
+        title="Failure hotspots by component",
+        description="Which component types are producing the most failed events.",
+        source_field="gen_ai.agent.component_type",
+        metric_label="Failures",
+        query="event.outcome: failure and gen_ai.agent.component_type:*",
     )
 
 
@@ -507,12 +577,16 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
     data_view_id = f"{index_prefix}-events-view"
     saved_search_id = f"{index_prefix}-event-stream"
     failure_search_id = f"{index_prefix}-event-failures"
+    session_search_id = f"{index_prefix}-session-drilldown"
     dashboard_id = f"{index_prefix}-overview"
     lens_event_rate_id = f"{index_prefix}-lens-event-rate"
     lens_latency_id = f"{index_prefix}-lens-latency"
+    lens_top_sessions_id = f"{index_prefix}-lens-top-sessions"
+    lens_failed_sessions_id = f"{index_prefix}-lens-failed-sessions"
     lens_top_tools_id = f"{index_prefix}-lens-top-tools"
     lens_token_usage_id = f"{index_prefix}-lens-token-usage"
     lens_component_type_id = f"{index_prefix}-lens-component-type"
+    lens_component_failures_id = f"{index_prefix}-lens-component-failures"
 
     objects: list[dict[str, Any]] = [
         {
@@ -529,44 +603,51 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
             title="Agent observability event stream",
             description="Default Kibana Discover surface for agent observability events.",
             data_view_id=data_view_id,
+            columns=DEFAULT_KIBANA_COLUMNS,
         ),
         build_search_saved_object(
             object_id=failure_search_id,
             title="Agent observability failures",
             description="Search focused on failure and ingest-error events.",
             data_view_id=data_view_id,
+            columns=DEFAULT_KIBANA_COLUMNS,
             query="event.outcome:failure or observer.ingest_error:*",
+        ),
+        build_search_saved_object(
+            object_id=session_search_id,
+            title="Agent session drilldown",
+            description="Conversation-first Discover entry with session, run, turn, and component context.",
+            data_view_id=data_view_id,
+            columns=DEFAULT_KIBANA_COLUMNS,
+            query="gen_ai.agent.session_id:* or gen_ai.agent.turn_id:* or gen_ai.agent.run_id:*",
         ),
         _build_lens_event_rate_visualization(object_id=lens_event_rate_id, data_view_id=data_view_id),
         _build_lens_latency_percentiles(object_id=lens_latency_id, data_view_id=data_view_id),
+        _build_lens_top_sessions(object_id=lens_top_sessions_id, data_view_id=data_view_id),
+        _build_lens_failed_sessions(object_id=lens_failed_sessions_id, data_view_id=data_view_id),
         _build_lens_top_tools(object_id=lens_top_tools_id, data_view_id=data_view_id),
         _build_lens_token_usage(object_id=lens_token_usage_id, data_view_id=data_view_id),
-        build_lens_saved_object(
+        _build_terms_pie_visualization(
             object_id=lens_component_type_id,
+            data_view_id=data_view_id,
             title="Events by component type",
             description="Breakdown by gen_ai.agent.component_type (runtime / tool / llm / mcp / memory / knowledge / guardrail).",
-            visualization_type="lnsPie",
-            state=_build_lens_state(
-                columns={
-                    "col-slice": {"operationType": "terms", "sourceField": "gen_ai.agent.component_type", "params": {"size": 10}},
-                    "col-metric": {"operationType": "count", "label": "Events"},
-                },
-                column_order=["col-slice", "col-metric"],
-                visualization={
-                    "shape": "pie",
-                    "layers": [{"layerId": DEFAULT_LENS_LAYER_ID, "primaryGroups": ["col-slice"], "metric": "col-metric"}],
-                },
-            ),
-            data_view_id=data_view_id,
+            source_field="gen_ai.agent.component_type",
+            metric_label="Events",
         ),
+        _build_lens_component_failures(object_id=lens_component_failures_id, data_view_id=data_view_id),
     ]
 
     dashboard_panels = [
         {"id": lens_event_rate_id, "type": "lens", "width": "24", "height": "12"},
         {"id": lens_latency_id, "type": "lens", "width": "24", "height": "12"},
+        {"id": lens_top_sessions_id, "type": "lens", "width": "24", "height": "12"},
+        {"id": lens_failed_sessions_id, "type": "lens", "width": "24", "height": "12"},
+        {"id": lens_component_type_id, "type": "lens", "width": "24", "height": "12"},
+        {"id": lens_component_failures_id, "type": "lens", "width": "24", "height": "12"},
         {"id": lens_top_tools_id, "type": "lens", "width": "24", "height": "12"},
         {"id": lens_token_usage_id, "type": "lens", "width": "24", "height": "12"},
-        {"id": lens_component_type_id, "type": "lens", "width": "24", "height": "12"},
+        {"id": session_search_id, "type": "search", "width": "24", "height": "15"},
         {"id": saved_search_id, "type": "search", "width": "24", "height": "15"},
         {"id": failure_search_id, "type": "search", "width": "24", "height": "15"},
     ]
@@ -622,7 +703,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
         build_dashboard_saved_object(
             object_id=dashboard_id,
             title="Agent observability overview",
-            description="Dashboard with event rate, latency, tool distribution, token usage, event stream, and failure stream.",
+            description="Dashboard with session-first drilldown, component hotspots, event rate, latency, tool distribution, token usage, event stream, and failure stream.",
             panel_refs=dashboard_panels,
         ),
     )
@@ -634,8 +715,18 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
             "data_view_id": data_view_id,
             "saved_search_id": saved_search_id,
             "failure_search_id": failure_search_id,
+            "session_search_id": session_search_id,
             "dashboard_id": dashboard_id,
-            "lens_ids": [lens_event_rate_id, lens_latency_id, lens_top_tools_id, lens_token_usage_id, lens_component_type_id] + extra_lens_ids,
+            "lens_ids": [
+                lens_event_rate_id,
+                lens_latency_id,
+                lens_top_sessions_id,
+                lens_failed_sessions_id,
+                lens_top_tools_id,
+                lens_token_usage_id,
+                lens_component_type_id,
+                lens_component_failures_id,
+            ] + extra_lens_ids,
             "events_alias_pattern": f"{ds_name}*",
             "object_count": len(objects),
         },
@@ -667,6 +758,11 @@ def build_report_config(index_prefix: str, discovery: dict[str, Any], *, extensi
             "token_input_total",
             "token_output_total",
             "cost_total",
+            "top_sessions",
+            "failed_sessions",
+            "slow_turns",
+            "top_components",
+            "failed_components",
             "top_tools",
             "top_models",
             "mcp_methods",

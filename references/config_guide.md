@@ -25,6 +25,7 @@ The normal bootstrap path should leave:
 - report config (`report-config.json`)
 - Kibana saved objects bundle (`kibana-saved-objects.json`, `kibana-saved-objects.ndjson`)
 - Elastic-native APM / RUM / profiling starter bundle when using `elastic-agent-fleet` or `apm-otlp-hybrid`
+- Elastic-native preflight checklist (`preflight-checklist.json`) for Kibana / Fleet / APM rollout readiness
 - optional Python instrumentation starter file (`agent_otel_bootstrap.py`)
 - optional apply summary (`apply-summary.json`)
 - optional sanity-check result
@@ -105,11 +106,13 @@ When bootstrap renders the `elastic-native/` bundle, treat it as the operator-fa
 
 - `apm-agent.env` is the runtime env template for Elastic APM / trace analysis
 - `surface-manifest.json` is the machine-readable map of Kibana native apps and correlation contract
+- `preflight-checklist.json` is the machine-readable readiness summary for required Kibana / Fleet / APM inputs and still-missing operator actions
 - `apm-entrypoints.md` and `trace-analysis-playbook.md` point operators at the right Kibana apps and trace workflow
 - `rum-config.json`, `rum-agent-snippet.js`, and `ux-observability-playbook.md` cover browser-side UX monitoring and frontend/backend trace correlation
 - `profiling-starter.md` is a rollout checklist for Elastic Universal Profiling, not an installer
 
 These files extend the base dashboard surface; they do not magically make APM, RUM, or profiling live without runtime / host rollout work.
+`apply-summary.json` now also carries the native preflight result when the elastic-native bundle is present, including contract checks, blocking checks, and ready counts derived from `surface-manifest.json`, `rum-config.json`, and optional Kibana/Fleet runtime reachability.
 
 ## Bridge Fallback Rule
 

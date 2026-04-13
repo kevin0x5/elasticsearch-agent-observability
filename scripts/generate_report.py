@@ -21,6 +21,10 @@ from common import (
 )
 
 
+TERM_BUCKET_SIZE = 5
+COMPONENT_BUCKET_SIZE = 8
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate observability report")
     parser.add_argument("--config", required=True)
@@ -52,22 +56,77 @@ def search_payload(time_range: str, time_field: str = "@timestamp") -> dict[str,
             "token_input_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}},
             "token_output_sum": {"sum": {"field": "gen_ai.usage.output_tokens"}},
             "cost_sum": {"sum": {"field": "gen_ai.agent.cost"}},
-            "top_tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": 5}},
-            "top_models": {"terms": {"field": "gen_ai.agent.model_name", "size": 5}},
-            "mcp_methods": {"terms": {"field": "gen_ai.agent.mcp_method_name", "size": 5}},
-            "error_types": {"terms": {"field": "gen_ai.agent.error_type", "size": 5}},
+            "top_sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE}},
+            "failed_sessions": {
+                "filter": {"term": {"event.outcome": "failure"}},
+                "aggs": {
+                    "sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE}},
+                },
+            },
+            "slow_turns": {
+                "terms": {
+                    "field": "gen_ai.agent.turn_id",
+                    "size": TERM_BUCKET_SIZE,
+                    "order": {"avg_latency": "desc"},
+                },
+                "aggs": {
+                    "avg_latency": {"avg": {"field": "gen_ai.agent.latency_ms"}},
+                    "sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": 1}},
+                    "failure_count": {"filter": {"term": {"event.outcome": "failure"}}},
+                },
+            },
+            "top_components": {"terms": {"field": "gen_ai.agent.component_type", "size": COMPONENT_BUCKET_SIZE}},
+            "failed_components": {
+                "filter": {"term": {"event.outcome": "failure"}},
+                "aggs": {
+                    "components": {"terms": {"field": "gen_ai.agent.component_type", "size": COMPONENT_BUCKET_SIZE}},
+                },
+            },
+            "top_tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE}},
+            "top_models": {"terms": {"field": "gen_ai.agent.model_name", "size": TERM_BUCKET_SIZE}},
+            "mcp_methods": {"terms": {"field": "gen_ai.agent.mcp_method_name", "size": TERM_BUCKET_SIZE}},
+            "error_types": {"terms": {"field": "gen_ai.agent.error_type", "size": TERM_BUCKET_SIZE}},
         },
     }
 
 
+def _extract_terms(agg: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"key": bucket.get("key"), "doc_count": bucket.get("doc_count", 0)}
+        for bucket in agg.get("buckets", [])
+    ]
+
+
+def _extract_nested_terms(agg: dict[str, Any], bucket_name: str) -> list[dict[str, Any]]:
+    return _extract_terms(agg.get(bucket_name, {}))
+
+
+def _extract_slow_turns(agg: dict[str, Any]) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for bucket in agg.get("buckets", []):
+        session_bucket = (bucket.get("sessions", {}).get("buckets", []) or [{}])[0]
+        avg_latency = bucket.get("avg_latency", {}).get("value") or 0
+        turns.append(
+            {
+                "key": bucket.get("key"),
+                "doc_count": bucket.get("doc_count", 0),
+                "avg_latency_ms": round(avg_latency, 2),
+                "failure_count": bucket.get("failure_count", {}).get("doc_count", 0),
+                "session_id": session_bucket.get("key"),
+            }
+        )
+    return turns
+
+
 def build_report(result: dict) -> dict[str, Any]:
     total = result.get("hits", {}).get("total", {}).get("value", 0)
-    with_errors = result.get("aggregations", {}).get("with_errors", {}).get("doc_count", 0)
-    tool_calls = result.get("aggregations", {}).get("tool_calls", {}).get("doc_count", 0)
-    tool_errors = result.get("aggregations", {}).get("tool_errors", {}).get("doc_count", 0)
+    aggs = result.get("aggregations", {})
+    with_errors = aggs.get("with_errors", {}).get("doc_count", 0)
+    tool_calls = aggs.get("tool_calls", {}).get("doc_count", 0)
+    tool_errors = aggs.get("tool_errors", {}).get("doc_count", 0)
     success_rate = round((total - with_errors) / total, 4) if total else 0.0
     tool_error_rate = round(tool_errors / tool_calls, 4) if tool_calls else 0.0
-    percentiles = result.get("aggregations", {}).get("latency_percentiles", {}).get("values", {})
+    percentiles = aggs.get("latency_percentiles", {}).get("values", {})
     p50_ns = percentiles.get("50.0", 0) or 0
     p95_ns = percentiles.get("95.0", 0) or 0
     return {
@@ -76,22 +135,38 @@ def build_report(result: dict) -> dict[str, Any]:
         "tool_error_rate": tool_error_rate,
         "p50_latency_ms": round(p50_ns / 1_000_000, 2) if p50_ns else 0,
         "p95_latency_ms": round(p95_ns / 1_000_000, 2) if p95_ns else 0,
-        "retry_total": result.get("aggregations", {}).get("retry_sum", {}).get("value", 0),
-        "token_input_total": result.get("aggregations", {}).get("token_input_sum", {}).get("value", 0),
-        "token_output_total": result.get("aggregations", {}).get("token_output_sum", {}).get("value", 0),
-        "cost_total": result.get("aggregations", {}).get("cost_sum", {}).get("value", 0),
-        "top_tools": result.get("aggregations", {}).get("top_tools", {}).get("buckets", []),
-        "top_models": result.get("aggregations", {}).get("top_models", {}).get("buckets", []),
-        "mcp_methods": result.get("aggregations", {}).get("mcp_methods", {}).get("buckets", []),
-        "error_types": result.get("aggregations", {}).get("error_types", {}).get("buckets", []),
+        "retry_total": aggs.get("retry_sum", {}).get("value", 0),
+        "token_input_total": aggs.get("token_input_sum", {}).get("value", 0),
+        "token_output_total": aggs.get("token_output_sum", {}).get("value", 0),
+        "cost_total": aggs.get("cost_sum", {}).get("value", 0),
+        "top_sessions": _extract_terms(aggs.get("top_sessions", {})),
+        "failed_sessions": _extract_nested_terms(aggs.get("failed_sessions", {}), "sessions"),
+        "slow_turns": _extract_slow_turns(aggs.get("slow_turns", {})),
+        "top_components": _extract_terms(aggs.get("top_components", {})),
+        "failed_components": _extract_nested_terms(aggs.get("failed_components", {}), "components"),
+        "top_tools": _extract_terms(aggs.get("top_tools", {})),
+        "top_models": _extract_terms(aggs.get("top_models", {})),
+        "mcp_methods": _extract_terms(aggs.get("mcp_methods", {})),
+        "error_types": _extract_terms(aggs.get("error_types", {})),
     }
 
 
 def render_markdown(report: dict, config: dict) -> str:
-    def render_terms(items: list[dict]) -> str:
+    def render_terms(items: list[dict[str, Any]]) -> str:
         if not items:
             return "- none"
         return "\n".join(f"- {item.get('key')}: {item.get('doc_count')}" for item in items)
+
+    def render_slow_turns(items: list[dict[str, Any]]) -> str:
+        if not items:
+            return "- none"
+        lines = []
+        for item in items:
+            suffix = f" | session={item.get('session_id')}" if item.get("session_id") else ""
+            lines.append(
+                f"- {item.get('key')}: avg_latency_ms={item.get('avg_latency_ms')} | failures={item.get('failure_count')} | docs={item.get('doc_count')}{suffix}"
+            )
+        return "\n".join(lines)
 
     return "\n".join(
         [
@@ -108,6 +183,21 @@ def render_markdown(report: dict, config: dict) -> str:
             f"- token_input_total: `{report['token_input_total']}`",
             f"- token_output_total: `{report['token_output_total']}`",
             f"- cost_total: `{report['cost_total']}`",
+            "",
+            "## Session hotspots",
+            render_terms(report["top_sessions"]),
+            "",
+            "## Failed sessions",
+            render_terms(report["failed_sessions"]),
+            "",
+            "## Slow turns",
+            render_slow_turns(report["slow_turns"]),
+            "",
+            "## Component mix",
+            render_terms(report["top_components"]),
+            "",
+            "## Failed components",
+            render_terms(report["failed_components"]),
             "",
             "## Top tools",
             render_terms(report["top_tools"]),

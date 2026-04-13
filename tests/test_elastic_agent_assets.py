@@ -51,6 +51,7 @@ class ElasticAgentAssetTests(unittest.TestCase):
             self.assertTrue((output_dir / "run-elastic-agent.sh").exists())
             self.assertTrue((output_dir / "elastic-agent.env").exists())
             self.assertTrue((output_dir / "surface-manifest.json").exists())
+            self.assertTrue((output_dir / "preflight-checklist.json").exists())
             self.assertTrue((output_dir / "apm-agent.env").exists())
             self.assertTrue((output_dir / "apm-entrypoints.md").exists())
             self.assertTrue((output_dir / "trace-analysis-playbook.md").exists())
@@ -61,6 +62,7 @@ class ElasticAgentAssetTests(unittest.TestCase):
 
             self.assertIn("policy", paths)
             self.assertIn("surface_manifest", paths)
+            self.assertIn("preflight", paths)
             self.assertIn("trace_playbook", paths)
             self.assertIn("rum_config", paths)
             self.assertIn("rum_snippet", paths)
@@ -95,6 +97,19 @@ class ElasticAgentAssetTests(unittest.TestCase):
                 surface_manifest["services"]["frontend"],
                 "agent-runtime-web",
             )
+
+            preflight = render_elastic_agent_assets.read_json(
+                output_dir / "preflight-checklist.json"
+            )
+            self.assertEqual(preflight["overall_status"], "action_required")
+            self.assertEqual(preflight["action_required_count"], 1)
+            self.assertEqual(preflight["native_apps"]["traces"], surface_manifest["kibana_apps"]["traces"])
+            self.assertFalse(any("token-value" in str(value) for value in preflight.values()))
+            check_map = {item["key"]: item for item in preflight["checks"]}
+            self.assertEqual(check_map["kibana_url"]["status"], "ready")
+            self.assertEqual(check_map["apm_server_url"]["status"], "ready")
+            self.assertEqual(check_map["otlp_endpoint"]["status"], "ready")
+            self.assertEqual(check_map["rum_distributed_tracing_origins"]["status"], "action_required")
 
             rum_config = render_elastic_agent_assets.read_json(
                 output_dir / "rum-config.json"

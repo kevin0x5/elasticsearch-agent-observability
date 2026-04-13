@@ -73,6 +73,32 @@ def _rum_service_name(service_name: str) -> str:
     return f"{service_name}-web"
 
 
+def _build_preflight_check(
+    *,
+    key: str,
+    label: str,
+    required: bool,
+    status: str,
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "required": required,
+        "status": status,
+        "detail": detail,
+    }
+
+
+def _compute_preflight_status(checks: list[dict[str, Any]]) -> str:
+    required_checks = [check for check in checks if check.get("required")]
+    if any(check.get("status") == "failed" for check in required_checks):
+        return "failed"
+    if any(check.get("status") == "action_required" for check in required_checks):
+        return "action_required"
+    return "ready"
+
+
 def build_policy(
     discovery: dict[str, Any],
     *,
@@ -314,6 +340,7 @@ def build_bootstrap_readme(
         "- an env template for enrollment plus APM / OTLP / RUM contract wiring",
         "- a launcher script for local bootstrap or operator review",
         "- a machine-readable surface manifest for Elastic native observability apps",
+        "- a machine-readable preflight checklist for Kibana / Fleet / APM rollout prerequisites",
         "- a trace analysis playbook that points operators at APM / Traces / Service Map first",
         "- a browser RUM config and starter snippet for user-experience monitoring",
         "- a profiling rollout checklist for host-level performance analysis",
@@ -379,6 +406,169 @@ def build_surface_manifest(
             "Validate page loads, route changes, and JS errors in User Experience after RUM ships.",
             "Use Universal Profiling for CPU-heavy paths after trace hotspots are visible.",
         ],
+    }
+
+
+def build_preflight_manifest(
+    discovery: dict[str, Any],
+    *,
+    ingest_mode: str,
+    service_name: str,
+    environment: str,
+    fleet_server_url: str,
+    fleet_enrollment_token: str,
+    apm_server_url: str,
+    kibana_url: str,
+    otlp_endpoint: str,
+    surface_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    module_kinds = _module_kind_set(discovery)
+    has_browser_frontend = "browser_frontend" in module_kinds
+    checks = [
+        _build_preflight_check(
+            key="kibana_url",
+            label="Kibana base URL",
+            required=True,
+            status="ready" if kibana_url.strip() else "action_required",
+            detail=(
+                f"Kibana base URL ready: `{kibana_url.strip()}`."
+                if kibana_url.strip()
+                else "Set `--kibana-url` so the native bundle points to real APM / Traces / Service Map / UX entrypoints."
+            ),
+        )
+    ]
+
+    if ingest_mode == "elastic-agent-fleet":
+        checks.extend(
+            [
+                _build_preflight_check(
+                    key="fleet_server_url",
+                    label="Fleet Server URL",
+                    required=True,
+                    status="ready" if fleet_server_url.strip() else "action_required",
+                    detail=(
+                        f"Fleet Server URL ready: `{fleet_server_url.strip()}`."
+                        if fleet_server_url.strip()
+                        else "Set `--fleet-server-url` before attempting Elastic Agent enrollment."
+                    ),
+                ),
+                _build_preflight_check(
+                    key="fleet_enrollment_token",
+                    label="Fleet enrollment token",
+                    required=True,
+                    status="ready" if fleet_enrollment_token.strip() else "action_required",
+                    detail=(
+                        "Fleet enrollment token provided."
+                        if fleet_enrollment_token.strip()
+                        else "Provide `--fleet-enrollment-token` before using the generated Fleet enrollment launcher."
+                    ),
+                ),
+            ]
+        )
+    else:
+        checks.extend(
+            [
+                _build_preflight_check(
+                    key="fleet_server_url",
+                    label="Fleet Server URL",
+                    required=False,
+                    status="skipped",
+                    detail="Fleet enrollment is only required for `elastic-agent-fleet` mode.",
+                ),
+                _build_preflight_check(
+                    key="fleet_enrollment_token",
+                    label="Fleet enrollment token",
+                    required=False,
+                    status="skipped",
+                    detail="Fleet enrollment token is only required for `elastic-agent-fleet` mode.",
+                ),
+            ]
+        )
+
+    if ingest_mode == "apm-otlp-hybrid":
+        checks.extend(
+            [
+                _build_preflight_check(
+                    key="apm_server_url",
+                    label="APM Server URL",
+                    required=True,
+                    status="ready" if apm_server_url.strip() else "action_required",
+                    detail=(
+                        f"APM Server URL ready: `{apm_server_url.strip()}`."
+                        if apm_server_url.strip()
+                        else "Set `--apm-server-url` so the hybrid path lands in Elastic APM semantics instead of an unresolved placeholder."
+                    ),
+                ),
+                _build_preflight_check(
+                    key="otlp_endpoint",
+                    label="OTLP endpoint",
+                    required=True,
+                    status="ready" if otlp_endpoint.strip() else "action_required",
+                    detail=(
+                        f"OTLP endpoint ready: `{otlp_endpoint.strip()}`."
+                        if otlp_endpoint.strip()
+                        else "Set `--otlp-endpoint` for the OTLP side of `apm-otlp-hybrid`."
+                    ),
+                ),
+            ]
+        )
+    else:
+        checks.extend(
+            [
+                _build_preflight_check(
+                    key="apm_server_url",
+                    label="APM Server URL",
+                    required=False,
+                    status="ready" if apm_server_url.strip() else "skipped",
+                    detail=(
+                        f"APM Server URL ready: `{apm_server_url.strip()}`."
+                        if apm_server_url.strip()
+                        else "Direct APM server URL is optional here; Fleet policy or later operator wiring may provide it."
+                    ),
+                ),
+                _build_preflight_check(
+                    key="otlp_endpoint",
+                    label="OTLP endpoint",
+                    required=False,
+                    status="ready" if otlp_endpoint.strip() else "skipped",
+                    detail=(
+                        f"OTLP endpoint ready: `{otlp_endpoint.strip()}`."
+                        if otlp_endpoint.strip()
+                        else "OTLP endpoint is only required when keeping an OTLP sidecar path alongside Elastic-native apps."
+                    ),
+                ),
+            ]
+        )
+
+    checks.append(
+        _build_preflight_check(
+            key="rum_distributed_tracing_origins",
+            label="Browser distributed tracing origins",
+            required=has_browser_frontend,
+            status="action_required" if has_browser_frontend else "skipped",
+            detail=(
+                "Replace the placeholder `RUM_DISTRIBUTED_TRACING_ORIGINS` value with the real browser/API origins before shipping the RUM snippet."
+                if has_browser_frontend
+                else "No browser frontend detected, so RUM origin wiring is optional."
+            ),
+        )
+    )
+
+    action_required = [check for check in checks if check.get("status") == "action_required"]
+    next_steps = [check["detail"] for check in action_required]
+    if not next_steps:
+        next_steps.append("Proceed to runtime rollout, then validate the native Kibana apps in the order listed by `surface-manifest.json`.")
+
+    return {
+        "product": "elasticsearch-agent-observability",
+        "ingest_mode": ingest_mode,
+        "service_name": service_name,
+        "environment": environment,
+        "overall_status": _compute_preflight_status(checks),
+        "action_required_count": len(action_required),
+        "checks": checks,
+        "native_apps": surface_manifest.get("kibana_apps", {}),
+        "next_steps": next_steps,
     }
 
 
@@ -652,12 +842,25 @@ def render_assets(
         service_name=service_name,
         environment=environment,
     )
+    preflight_manifest = build_preflight_manifest(
+        discovery,
+        ingest_mode=ingest_mode,
+        service_name=service_name,
+        environment=environment,
+        fleet_server_url=fleet_server_url,
+        fleet_enrollment_token=fleet_enrollment_token,
+        apm_server_url=apm_server_url,
+        kibana_url=kibana_url,
+        otlp_endpoint=otlp_endpoint,
+        surface_manifest=surface_manifest,
+    )
 
     env_path = output_dir / "elastic-agent.env"
     launcher_path = output_dir / "run-elastic-agent.sh"
     readme_path = output_dir / "README.md"
     policy_path = output_dir / "elastic-agent-policy.json"
     surface_manifest_path = output_dir / "surface-manifest.json"
+    preflight_path = output_dir / "preflight-checklist.json"
     apm_env_path = output_dir / "apm-agent.env"
     apm_readme_path = output_dir / "apm-entrypoints.md"
     trace_playbook_path = output_dir / "trace-analysis-playbook.md"
@@ -668,6 +871,7 @@ def render_assets(
 
     write_json(policy_path, policy)
     write_json(surface_manifest_path, surface_manifest)
+    write_json(preflight_path, preflight_manifest)
     write_text(env_path, env_text)
     write_text(launcher_path, build_run_script(ingest_mode=ingest_mode, env_path=env_path))
     write_text(
@@ -739,6 +943,7 @@ def render_assets(
         "launcher": str(launcher_path),
         "readme": str(readme_path),
         "surface_manifest": str(surface_manifest_path),
+        "preflight": str(preflight_path),
         "apm_env": str(apm_env_path),
         "apm_readme": str(apm_readme_path),
         "trace_playbook": str(trace_playbook_path),

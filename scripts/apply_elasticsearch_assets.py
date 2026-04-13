@@ -29,6 +29,12 @@ from common import (
 )
 
 RESOURCE_ALREADY_EXISTS = "resource_already_exists_exception"
+NATIVE_KIBANA_APP_KEYS = ("services", "traces", "service_map", "user_experience")
+PLACEHOLDER_HOST_MARKERS = (
+    "kibana.example.com",
+    "apm.example.com",
+    "your-app-origin.example.com",
+)
 
 
 def sanity_check(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
@@ -80,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-bootstrap-index", action="store_true", help="Skip creating the data stream")
     parser.add_argument("--kibana-url", default="", help="Optional Kibana base URL for applying saved objects")
     parser.add_argument("--kibana-space", default="default")
+    parser.add_argument("--native-assets-dir", default="", help="Optional elastic-native bundle directory for preflight inspection")
     parser.add_argument("--skip-kibana-assets", action="store_true", help="Skip applying Kibana saved objects even if present")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be applied without actually sending requests")
     return parser.parse_args()
@@ -102,6 +109,280 @@ def load_assets(assets_dir: Path) -> dict[str, Any]:
     if settings_path.exists():
         result["component_template_settings"] = read_json(settings_path)
     return result
+
+
+def load_native_assets(native_assets_dir: Path) -> dict[str, Any]:
+    resolved = validate_workspace_dir(native_assets_dir, "Native assets directory")
+    result: dict[str, Any] = {}
+    preflight_path = resolved / "preflight-checklist.json"
+    surface_manifest_path = resolved / "surface-manifest.json"
+    rum_config_path = resolved / "rum-config.json"
+    if preflight_path.exists():
+        result["preflight"] = read_json(preflight_path)
+    if surface_manifest_path.exists():
+        result["surface_manifest"] = read_json(surface_manifest_path)
+    if rum_config_path.exists():
+        result["rum_config"] = read_json(rum_config_path)
+    if not result:
+        raise SkillError("Native assets directory must contain `preflight-checklist.json`, `surface-manifest.json`, or `rum-config.json`")
+    result["path"] = str(resolved)
+    return result
+
+
+def _compute_native_overall_status(static_checks: list[dict[str, Any]], runtime_checks: list[dict[str, Any]]) -> str:
+    required_checks = [check for check in [*static_checks, *runtime_checks] if check.get("required")]
+    if any(check.get("status") == "failed" for check in required_checks):
+        return "failed"
+    if any(check.get("status") == "action_required" for check in required_checks):
+        return "action_required"
+    return "ready"
+
+
+def _build_native_check(*, key: str, label: str, required: bool, status: str, detail: str) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "required": required,
+        "status": status,
+        "detail": detail,
+    }
+
+
+def _contains_placeholder_host(value: str) -> bool:
+    normalized = value.strip()
+    return bool(normalized) and any(marker in normalized for marker in PLACEHOLDER_HOST_MARKERS)
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _build_native_contract_checks(
+    *,
+    preflight: dict[str, Any],
+    surface_manifest: dict[str, Any],
+    rum_config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    kibana_apps = surface_manifest.get("kibana_apps", {}) if isinstance(surface_manifest, dict) else {}
+    missing_apps = [key for key in NATIVE_KIBANA_APP_KEYS if not str(kibana_apps.get(key, "")).strip()]
+    placeholder_apps = [
+        key for key in NATIVE_KIBANA_APP_KEYS if _contains_placeholder_host(str(kibana_apps.get(key, "")))
+    ]
+    if missing_apps:
+        entrypoint_status = "failed"
+        entrypoint_detail = (
+            "surface-manifest.json is missing native Kibana app entrypoints for "
+            f"{', '.join(missing_apps)}. Re-render the elastic-native bundle before rollout."
+        )
+    elif placeholder_apps:
+        entrypoint_status = "action_required"
+        entrypoint_detail = (
+            "Native Kibana app entrypoints still point at placeholder hosts for "
+            f"{', '.join(placeholder_apps)}. Set a real `--kibana-url` and re-render the bundle."
+        )
+    else:
+        entrypoint_status = "ready"
+        entrypoint_detail = "Native Kibana app entrypoints are present in surface-manifest.json."
+    checks.append(
+        _build_native_check(
+            key="native_kibana_entrypoints",
+            label="Native Kibana entrypoints",
+            required=True,
+            status=entrypoint_status,
+            detail=entrypoint_detail,
+        )
+    )
+
+    services = surface_manifest.get("services", {}) if isinstance(surface_manifest, dict) else {}
+    backend_service = str(services.get("backend", "")).strip()
+    frontend_service = str(services.get("frontend", "")).strip()
+    manifest_environment = str(services.get("environment", "")).strip()
+    expected_service_name = str(preflight.get("service_name", "")).strip()
+    expected_environment = str(preflight.get("environment", "")).strip()
+    rum_service_name = str(rum_config.get("serviceName", "")).strip() if isinstance(rum_config, dict) else ""
+    identity_issues: list[str] = []
+    if not backend_service:
+        identity_issues.append("surface manifest backend service is missing")
+    elif expected_service_name and backend_service != expected_service_name:
+        identity_issues.append(
+            f"surface manifest backend service `{backend_service}` does not match preflight service `{expected_service_name}`"
+        )
+    if not manifest_environment:
+        identity_issues.append("surface manifest environment is missing")
+    elif expected_environment and manifest_environment != expected_environment:
+        identity_issues.append(
+            f"surface manifest environment `{manifest_environment}` does not match preflight environment `{expected_environment}`"
+        )
+    if frontend_service and rum_service_name and frontend_service != rum_service_name:
+        identity_issues.append(
+            f"RUM service `{rum_service_name}` does not match surface manifest frontend service `{frontend_service}`"
+        )
+    checks.append(
+        _build_native_check(
+            key="native_service_contract",
+            label="Native service identity contract",
+            required=True,
+            status="action_required" if identity_issues else "ready",
+            detail=(
+                "Native backend/frontend service identity is aligned across preflight, surface manifest, and RUM config."
+                if not identity_issues
+                else "; ".join(identity_issues)
+            ),
+        )
+    )
+
+    rum_origins = _normalize_string_list(rum_config.get("distributedTracingOrigins", [])) if isinstance(rum_config, dict) else []
+    rum_required = any(
+        check.get("key") == "rum_distributed_tracing_origins" and check.get("required")
+        for check in preflight.get("checks", [])
+    )
+    if rum_required:
+        if not rum_origins:
+            rum_status = "failed"
+            rum_detail = "rum-config.json is missing distributedTracingOrigins for the detected browser frontend."
+        elif any(_contains_placeholder_host(origin) for origin in rum_origins):
+            rum_status = "action_required"
+            rum_detail = (
+                "rum-config.json still uses placeholder distributed tracing origins. "
+                "Replace them with the real browser/API origins before shipping the UX path."
+            )
+        else:
+            rum_status = "ready"
+            rum_detail = "RUM distributed tracing origins are explicitly configured for frontend/backend trace correlation."
+    elif rum_origins:
+        rum_status = "ready" if not any(_contains_placeholder_host(origin) for origin in rum_origins) else "action_required"
+        rum_detail = (
+            "RUM distributed tracing origins are configured."
+            if rum_status == "ready"
+            else "RUM distributed tracing origins exist but still include placeholder hosts."
+        )
+    else:
+        rum_status = "skipped"
+        rum_detail = "No browser frontend contract was required by the native preflight bundle."
+    checks.append(
+        _build_native_check(
+            key="rum_trace_correlation_contract",
+            label="RUM trace correlation contract",
+            required=rum_required,
+            status=rum_status,
+            detail=rum_detail,
+        )
+    )
+    return checks
+
+
+def inspect_native_assets(
+    config: ESConfig,
+    *,
+    native_assets: dict[str, Any],
+    kibana_url: str | None,
+    perform_runtime_checks: bool,
+) -> dict[str, Any]:
+    preflight = native_assets.get("preflight") if isinstance(native_assets, dict) else {}
+    surface_manifest = native_assets.get("surface_manifest") if isinstance(native_assets, dict) else {}
+    rum_config = native_assets.get("rum_config") if isinstance(native_assets, dict) else {}
+    preflight_checks = list(preflight.get("checks", [])) if isinstance(preflight, dict) else []
+    contract_checks = _build_native_contract_checks(
+        preflight=preflight if isinstance(preflight, dict) else {},
+        surface_manifest=surface_manifest if isinstance(surface_manifest, dict) else {},
+        rum_config=rum_config if isinstance(rum_config, dict) else {},
+    )
+    static_checks = [*preflight_checks, *contract_checks]
+    ingest_mode = str(preflight.get("ingest_mode", "")).strip() if isinstance(preflight, dict) else ""
+    runtime_checks: list[dict[str, Any]] = []
+
+    if perform_runtime_checks and kibana_url:
+        try:
+            status_response = kibana_request(config, kibana_url, "GET", "/api/status")
+            overall = status_response.get("status", {}).get("overall", {}) if isinstance(status_response, dict) else {}
+            level = overall.get("level") or overall.get("state") or "unknown"
+            summary = overall.get("summary") or overall.get("title") or "Kibana status API reachable"
+            runtime_checks.append(
+                _build_native_check(
+                    key="kibana_status_api",
+                    label="Kibana status API",
+                    required=True,
+                    status="ready",
+                    detail=f"Kibana API reachable ({level}): {summary}",
+                )
+            )
+        except SkillError as exc:
+            runtime_checks.append(
+                _build_native_check(
+                    key="kibana_status_api",
+                    label="Kibana status API",
+                    required=True,
+                    status="failed",
+                    detail=str(exc),
+                )
+            )
+
+        if ingest_mode == "elastic-agent-fleet":
+            try:
+                fleet_response = kibana_request(config, kibana_url, "GET", "/api/fleet/agent_policies?page=1&perPage=1")
+                total = fleet_response.get("total") if isinstance(fleet_response, dict) else None
+                total_text = f" total={total}" if total is not None else ""
+                runtime_checks.append(
+                    _build_native_check(
+                        key="fleet_agent_policies_api",
+                        label="Fleet agent policies API",
+                        required=True,
+                        status="ready",
+                        detail=f"Fleet API reachable via Kibana.{total_text}",
+                    )
+                )
+            except SkillError as exc:
+                runtime_checks.append(
+                    _build_native_check(
+                        key="fleet_agent_policies_api",
+                        label="Fleet agent policies API",
+                        required=True,
+                        status="failed",
+                        detail=str(exc),
+                    )
+                )
+    elif perform_runtime_checks:
+        runtime_checks.append(
+            _build_native_check(
+                key="kibana_status_api",
+                label="Kibana status API",
+                required=True,
+                status="action_required",
+                detail="Set `--kibana-url` to run native Kibana / Fleet reachability checks.",
+            )
+        )
+
+    combined_checks = [*static_checks, *runtime_checks]
+    blocking_checks = [
+        {
+            "key": str(check.get("key", "")).strip(),
+            "status": str(check.get("status", "")).strip(),
+            "detail": str(check.get("detail", "")).strip(),
+        }
+        for check in combined_checks
+        if check.get("status") in {"action_required", "failed"}
+    ]
+    action_required_count = sum(1 for check in combined_checks if check.get("status") == "action_required")
+    failed_count = sum(1 for check in combined_checks if check.get("status") == "failed")
+    return {
+        "path": native_assets.get("path"),
+        "ingest_mode": ingest_mode or surface_manifest.get("ingest_mode"),
+        "overall_status": _compute_native_overall_status(static_checks, runtime_checks),
+        "action_required_count": action_required_count,
+        "failed_count": failed_count,
+        "ready_count": sum(1 for check in combined_checks if check.get("status") == "ready"),
+        "static_checks": static_checks,
+        "contract_checks": contract_checks,
+        "runtime_checks": runtime_checks,
+        "blocking_checks": blocking_checks,
+        "native_apps": surface_manifest.get("kibana_apps", {}),
+        "next_steps": list(preflight.get("next_steps", [])) if isinstance(preflight, dict) else [],
+    }
 
 
 def kibana_request(config: ESConfig, kibana_url: str, method: str, path: str, payload: dict | None = None, *, body_bytes: bytes | None = None) -> dict[str, Any]:
@@ -204,10 +485,18 @@ def apply_assets(
     kibana_url: str | None = None,
     kibana_space: str = "default",
     apply_kibana: bool = True,
+    native_assets_dir: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     validated_prefix = validate_index_prefix(index_prefix)
     assets = load_assets(assets_dir)
+    native_assets = load_native_assets(native_assets_dir) if native_assets_dir else None
+    native_summary = inspect_native_assets(
+        config,
+        native_assets=native_assets,
+        kibana_url=kibana_url,
+        perform_runtime_checks=bool(native_assets and not dry_run),
+    ) if native_assets else None
     template_name = f"{validated_prefix}-events-template"
     pipeline_name = f"{validated_prefix}-normalize"
     ilm_name = f"{validated_prefix}-lifecycle"
@@ -228,11 +517,16 @@ def apply_assets(
             objects = assets["kibana_saved_objects"].get("objects", [])
             for obj in objects:
                 plan.append({"action": "POST", "path": f"/api/saved_objects/{obj.get('type')}/{obj.get('id')}", "asset": f"kibana:{obj.get('type')}"})
+        if native_summary and kibana_url:
+            plan.append({"action": "CHECK", "path": "/api/status", "asset": "native:kibana_status_api"})
+            if native_summary.get("ingest_mode") == "elastic-agent-fleet":
+                plan.append({"action": "CHECK", "path": "/api/fleet/agent_policies?page=1&perPage=1", "asset": "native:fleet_agent_policies_api"})
         return {
             "dry_run": True,
             "plan": plan,
             "plan_count": len(plan),
             "index_prefix": validated_prefix,
+            "native_bundle": native_summary,
         }
 
     responses: dict[str, Any] = {
@@ -277,6 +571,7 @@ def apply_assets(
         "data_stream": build_data_stream_name(validated_prefix),
         "bootstrap_index": bootstrap_summary,
         "kibana": kibana_summary,
+        "native_bundle": native_summary,
         "responses": responses,
     }
 
@@ -298,6 +593,7 @@ def main() -> int:
             kibana_url=args.kibana_url or None,
             kibana_space=args.kibana_space,
             apply_kibana=not args.skip_kibana_assets,
+            native_assets_dir=Path(args.native_assets_dir).expanduser().resolve() if args.native_assets_dir else None,
             dry_run=args.dry_run,
         )
         if summary.get("dry_run"):
@@ -312,6 +608,13 @@ def main() -> int:
             print(f"   bootstrap: {bs['data_stream']} ({bs['status']})")
         if summary.get("kibana"):
             print(f"   kibana objects: {summary['kibana']['count']}")
+        if summary.get("native_bundle"):
+            native = summary["native_bundle"]
+            print(
+                "   native preflight: "
+                f"{native['overall_status']} "
+                f"(ready={native.get('ready_count', 0)}, action_required={native.get('action_required_count', 0)}, failed={native.get('failed_count', 0)})"
+            )
         return 0
     except SkillError as exc:
         print_error(str(exc))

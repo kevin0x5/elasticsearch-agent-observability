@@ -88,6 +88,99 @@ class ApplyAndBootstrapTests(unittest.TestCase):
         self.assertTrue(any(path.startswith("/api/saved_objects/index-pattern/agent-obsv-events-view") for _, path, _ in kibana_calls))
         self.assertTrue(any(path.startswith("/api/saved_objects/search/agent-obsv-event-stream") for _, path, _ in kibana_calls))
 
+    def test_apply_assets_reports_native_preflight_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            assets_dir = root / "elasticsearch"
+            native_dir = root / "elastic-native"
+            assets_dir.mkdir()
+            native_dir.mkdir()
+            (assets_dir / "index-template.json").write_text('{"index_patterns": ["agent-obsv-events*"], "data_stream": {}}', encoding="utf-8")
+            (assets_dir / "ingest-pipeline.json").write_text('{"processors": []}', encoding="utf-8")
+            (assets_dir / "ilm-policy.json").write_text('{"policy": {"phases": {}}}', encoding="utf-8")
+            (assets_dir / "report-config.json").write_text('{"events_alias": "agent-obsv-events"}', encoding="utf-8")
+            (assets_dir / "kibana-saved-objects.json").write_text('{"objects": []}', encoding="utf-8")
+            (native_dir / "preflight-checklist.json").write_text(
+                '{"ingest_mode": "elastic-agent-fleet", "service_name": "agent-runtime", "environment": "dev", "checks": [{"key": "kibana_url", "required": true, "status": "ready", "detail": "ok"}], "next_steps": ["review fleet"]}',
+                encoding="utf-8",
+            )
+            (native_dir / "surface-manifest.json").write_text(
+                '{"services": {"backend": "agent-runtime", "frontend": "agent-runtime-web", "environment": "dev"}, "kibana_apps": {"services": "https://kibana.acme.internal/app/apm/services", "traces": "https://kibana.acme.internal/app/apm/traces", "service_map": "https://kibana.acme.internal/app/apm/service-map", "user_experience": "https://kibana.acme.internal/app/ux"}}',
+                encoding="utf-8",
+            )
+
+            def fake_es_request(config, method, path, payload=None):
+                return {"acknowledged": True}
+
+            def fake_kibana_request(config, kibana_url, method, path, payload=None, *, body_bytes=None):
+                if path == "/api/status":
+                    return {"status": {"overall": {"level": "available", "summary": "ok"}}}
+                if path.startswith("/api/fleet/agent_policies"):
+                    return {"total": 3, "items": []}
+                raise AssertionError(path)
+
+            with mock.patch.object(apply_elasticsearch_assets, "es_request", side_effect=fake_es_request):
+                with mock.patch.object(apply_elasticsearch_assets, "kibana_request", side_effect=fake_kibana_request):
+                    summary = apply_elasticsearch_assets.apply_assets(
+                        ESConfig(es_url="http://localhost:9200"),
+                        assets_dir=assets_dir,
+                        native_assets_dir=native_dir,
+                        index_prefix="agent-obsv",
+                        bootstrap_index=False,
+                        kibana_url="https://kibana.acme.internal",
+                        apply_kibana=False,
+                    )
+
+        self.assertIsNotNone(summary["native_bundle"])
+        self.assertEqual(summary["native_bundle"]["overall_status"], "ready")
+        self.assertEqual(len(summary["native_bundle"]["runtime_checks"]), 2)
+        self.assertEqual(len(summary["native_bundle"]["contract_checks"]), 3)
+        self.assertEqual(summary["native_bundle"]["ready_count"], 5)
+        self.assertEqual(summary["native_bundle"]["native_apps"]["services"], "https://kibana.acme.internal/app/apm/services")
+
+    def test_apply_assets_surfaces_native_contract_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            assets_dir = root / "elasticsearch"
+            native_dir = root / "elastic-native"
+            assets_dir.mkdir()
+            native_dir.mkdir()
+            (assets_dir / "index-template.json").write_text('{"index_patterns": ["agent-obsv-events*"], "data_stream": {}}', encoding="utf-8")
+            (assets_dir / "ingest-pipeline.json").write_text('{"processors": []}', encoding="utf-8")
+            (assets_dir / "ilm-policy.json").write_text('{"policy": {"phases": {}}}', encoding="utf-8")
+            (assets_dir / "report-config.json").write_text('{"events_alias": "agent-obsv-events"}', encoding="utf-8")
+            (assets_dir / "kibana-saved-objects.json").write_text('{"objects": []}', encoding="utf-8")
+            (native_dir / "preflight-checklist.json").write_text(
+                '{"ingest_mode": "apm-otlp-hybrid", "service_name": "agent-runtime", "environment": "dev", "checks": [{"key": "kibana_url", "required": true, "status": "ready", "detail": "ok"}, {"key": "rum_distributed_tracing_origins", "required": true, "status": "ready", "detail": "configured"}], "next_steps": []}',
+                encoding="utf-8",
+            )
+            (native_dir / "surface-manifest.json").write_text(
+                '{"services": {"backend": "agent-runtime", "frontend": "agent-runtime-web", "environment": "prod"}, "kibana_apps": {"services": "https://kibana.example.com/app/apm/services", "traces": "https://kibana.example.com/app/apm/traces", "service_map": "https://kibana.example.com/app/apm/service-map", "user_experience": "https://kibana.example.com/app/ux"}}',
+                encoding="utf-8",
+            )
+            (native_dir / "rum-config.json").write_text(
+                '{"serviceName": "agent-runtime-web", "distributedTracingOrigins": ["https://your-app-origin.example.com"]}',
+                encoding="utf-8",
+            )
+
+            summary = apply_elasticsearch_assets.apply_assets(
+                ESConfig(es_url="http://localhost:9200"),
+                assets_dir=assets_dir,
+                native_assets_dir=native_dir,
+                index_prefix="agent-obsv",
+                bootstrap_index=False,
+                kibana_url="https://kibana.example.com",
+                apply_kibana=False,
+                dry_run=True,
+            )
+
+        self.assertEqual(summary["native_bundle"]["overall_status"], "action_required")
+        contract_map = {item["key"]: item for item in summary["native_bundle"]["contract_checks"]}
+        self.assertEqual(contract_map["native_kibana_entrypoints"]["status"], "action_required")
+        self.assertEqual(contract_map["native_service_contract"]["status"], "action_required")
+        self.assertEqual(contract_map["rum_trace_correlation_contract"]["status"], "action_required")
+        self.assertGreaterEqual(len(summary["native_bundle"]["blocking_checks"]), 3)
+
     def test_apply_assets_does_not_fall_back_to_legacy_write_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             assets_dir = Path(tmp_dir)
@@ -248,6 +341,43 @@ class ApplyAndBootstrapTests(unittest.TestCase):
             )
         paths = [step["path"] for step in summary["plan"]]
         self.assertTrue(any(path.endswith("/api/saved_objects/search/test-search") for path in paths))
+
+    def test_apply_assets_dry_run_can_preview_native_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            assets_dir = root / "elasticsearch"
+            native_dir = root / "elastic-native"
+            assets_dir.mkdir()
+            native_dir.mkdir()
+            (assets_dir / "component-template-ecs-base.json").write_text('{"template": {"mappings": {}}}', encoding="utf-8")
+            (assets_dir / "component-template-settings.json").write_text('{"template": {"settings": {}}}', encoding="utf-8")
+            (assets_dir / "index-template.json").write_text('{"index_patterns": ["agent-obsv-events*"], "data_stream": {}}', encoding="utf-8")
+            (assets_dir / "ingest-pipeline.json").write_text('{"processors": []}', encoding="utf-8")
+            (assets_dir / "ilm-policy.json").write_text('{"policy": {"phases": {}}}', encoding="utf-8")
+            (assets_dir / "report-config.json").write_text('{"events_alias": "agent-obsv-events"}', encoding="utf-8")
+            (assets_dir / "kibana-saved-objects.json").write_text('{"objects": []}', encoding="utf-8")
+            (native_dir / "preflight-checklist.json").write_text(
+                '{"ingest_mode": "elastic-agent-fleet", "service_name": "agent-runtime", "environment": "dev", "checks": [{"key": "kibana_url", "required": true, "status": "ready", "detail": "ok"}], "next_steps": []}',
+                encoding="utf-8",
+            )
+            (native_dir / "surface-manifest.json").write_text(
+                '{"services": {"backend": "agent-runtime", "frontend": "agent-runtime-web", "environment": "dev"}, "kibana_apps": {"services": "https://kibana.acme.internal/app/apm/services", "traces": "https://kibana.acme.internal/app/apm/traces", "service_map": "https://kibana.acme.internal/app/apm/service-map", "user_experience": "https://kibana.acme.internal/app/ux"}}',
+                encoding="utf-8",
+            )
+            summary = apply_elasticsearch_assets.apply_assets(
+                ESConfig(es_url="http://localhost:9200"),
+                assets_dir=assets_dir,
+                native_assets_dir=native_dir,
+                index_prefix="agent-obsv",
+                bootstrap_index=False,
+                kibana_url="https://kibana.acme.internal",
+                apply_kibana=False,
+                dry_run=True,
+            )
+        self.assertEqual(summary["native_bundle"]["overall_status"], "ready")
+        paths = [step["path"] for step in summary["plan"]]
+        self.assertIn("/api/status", paths)
+        self.assertIn("/api/fleet/agent_policies?page=1&perPage=1", paths)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import bootstrap_observability  # noqa: E402
 import common  # noqa: E402
 import generate_report  # noqa: E402
 import render_collector_config  # noqa: E402
+import render_elastic_agent_assets  # noqa: E402
 import render_es_assets  # noqa: E402
 
 
@@ -224,6 +225,32 @@ class ContractsAndSecurityTests(unittest.TestCase):
         self.assertIn("p95_latency_ms", report_config["metrics"])
         self.assertNotIn("p50_latency_ns", report_config["metrics"])
 
+    def test_native_preflight_manifest_does_not_store_sensitive_tokens(self) -> None:
+        surface_manifest = render_elastic_agent_assets.build_surface_manifest(
+            service_name="agent-runtime",
+            environment="dev",
+            apm_server_url="https://apm.example.com:8200",
+            kibana_url="https://kibana.example.com",
+            ingest_mode="elastic-agent-fleet",
+        )
+        manifest = render_elastic_agent_assets.build_preflight_manifest(
+            DISCOVERY_SAMPLE,
+            ingest_mode="elastic-agent-fleet",
+            service_name="agent-runtime",
+            environment="dev",
+            fleet_server_url="https://fleet.example.com:8220",
+            fleet_enrollment_token="super-secret-token",
+            apm_server_url="",
+            kibana_url="https://kibana.example.com",
+            otlp_endpoint="http://127.0.0.1:4317",
+            surface_manifest=surface_manifest,
+        )
+        self.assertEqual(manifest["overall_status"], "ready")
+        self.assertNotIn("super-secret-token", str(manifest))
+        checks = {item["key"]: item for item in manifest["checks"]}
+        self.assertEqual(checks["fleet_enrollment_token"]["status"], "ready")
+        self.assertEqual(checks["apm_server_url"]["status"], "skipped")
+
     def test_collect_summary_notes_reports_truncation_and_auth_mode(self) -> None:
         notes = bootstrap_observability.collect_summary_notes(
             {"files_scanned": 400, "detected_modules": [], "recommended_ingest_modes": [{"mode": "collector", "score": 0.94}]},
@@ -300,6 +327,21 @@ class ContractsAndSecurityTests(unittest.TestCase):
                 "token_input_sum": {"value": 1000},
                 "token_output_sum": {"value": 500},
                 "cost_sum": {"value": 0.5},
+                "top_sessions": {"buckets": [{"key": "session-1", "doc_count": 12}]},
+                "failed_sessions": {"sessions": {"buckets": [{"key": "session-1", "doc_count": 4}]}},
+                "slow_turns": {
+                    "buckets": [
+                        {
+                            "key": "turn-1",
+                            "doc_count": 3,
+                            "avg_latency": {"value": 3210.0},
+                            "sessions": {"buckets": [{"key": "session-1", "doc_count": 3}]},
+                            "failure_count": {"doc_count": 1},
+                        }
+                    ]
+                },
+                "top_components": {"buckets": [{"key": "tool", "doc_count": 40}]},
+                "failed_components": {"components": {"buckets": [{"key": "tool", "doc_count": 2}]}},
                 "top_tools": {"buckets": []},
                 "top_models": {"buckets": []},
                 "mcp_methods": {"buckets": []},
@@ -309,6 +351,9 @@ class ContractsAndSecurityTests(unittest.TestCase):
         report = generate_report.build_report(mock_result)
         self.assertEqual(report["p50_latency_ms"], 500.0)
         self.assertEqual(report["p95_latency_ms"], 2000.0)
+        self.assertEqual(report["top_sessions"][0]["key"], "session-1")
+        self.assertEqual(report["slow_turns"][0]["avg_latency_ms"], 3210.0)
+        self.assertEqual(report["failed_components"][0]["key"], "tool")
 
     def test_esconfig_has_verify_tls_and_kibana_api_key(self) -> None:
         config = common.ESConfig(es_url="http://localhost:9200")

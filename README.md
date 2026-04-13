@@ -30,7 +30,7 @@ It turns a workspace into a ready observability starter for Elasticsearch and Ki
 - **Collection layer**: OpenTelemetry Collector configuration, environment files, and launch scripts
 - **Elasticsearch assets**: data streams, component templates (with component-type / guardrail / evaluation / memory fields), index templates, ingest pipelines, and lifecycle policies
 - **Kibana assets**: data views, saved searches, Lens visualizations, and an overview dashboard
-- **Elastic-native starter bundle**: APM env + entrypoint guide, surface manifest, trace-analysis playbook, browser RUM config/snippet, UX playbook, and profiling rollout checklist
+- **Elastic-native starter bundle**: APM env + entrypoint guide, surface manifest, preflight checklist, trace-analysis playbook, browser RUM config/snippet, UX playbook, and profiling rollout checklist
 - **Diagnosis flow**: alert checks for error-rate spikes, latency regressions, and token anomalies with RCA output
 - **Drift validation**: compare the live Elasticsearch cluster with locally generated assets
 - **Knowledge archival**: write RCA results into `elasticsearch-insight-store`
@@ -127,6 +127,7 @@ generated/<output-dir>/                # default: generated/bootstrap
 │   ├── apm-agent.env
 │   ├── apm-entrypoints.md
 │   ├── surface-manifest.json
+│   ├── preflight-checklist.json
 │   ├── trace-analysis-playbook.md
 │   ├── rum-config.json
 │   ├── rum-agent-snippet.js
@@ -207,6 +208,7 @@ kill "$(cat generated/bootstrap/runtime/otlphttpbridge.pid)"
 When the operator chooses `elastic-agent-fleet` or `apm-otlp-hybrid`, the generated `elastic-native/` bundle is no longer just a thin policy stub:
 
 - **APM / tracing**: `apm-agent.env`, `apm-entrypoints.md`, `surface-manifest.json`, and `trace-analysis-playbook.md` point you at Kibana `Services`, `Traces`, and `Service Map` instead of rebuilding trace analysis as custom dashboards
+- **Preflight / readiness**: `preflight-checklist.json` captures the required Kibana / Fleet / APM rollout inputs, while `apply-summary.json` now also reports native contract drift, blocking checks, and ready counts across `surface-manifest.json` / `rum-config.json` / runtime reachability
 - **User experience monitoring**: `rum-config.json`, `rum-agent-snippet.js`, and `ux-observability-playbook.md` give a direct starter for `@elastic/apm-rum` plus frontend/backend trace correlation
 - **Performance profiling**: `profiling-starter.md` documents the rollout contract for Elastic Universal Profiling so host-level performance analysis stays aligned with APM traces
 

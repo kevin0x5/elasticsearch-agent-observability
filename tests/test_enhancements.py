@@ -198,7 +198,8 @@ class DashboardExtensionsTests(unittest.TestCase):
         bundle_default = render_es_assets.build_kibana_saved_objects("agent-obsv")
         bundle_none = render_es_assets.build_kibana_saved_objects("agent-obsv", extensions=None)
         self.assertEqual(bundle_default["summary"]["object_count"], bundle_none["summary"]["object_count"])
-        self.assertEqual(len(bundle_default["summary"]["lens_ids"]), 5)
+        self.assertEqual(len(bundle_default["summary"]["lens_ids"]), 8)
+        self.assertIn("session_search_id", bundle_default["summary"])
 
     def test_lens_objects_omit_kibana_saved_object_meta(self) -> None:
         extensions = [
@@ -377,7 +378,7 @@ class InstrumentSnippetTests(unittest.TestCase):
 
 
 class AlertDiagnoseLogicTests(unittest.TestCase):
-    def _make_current(self, error_count: int = 0, total: int = 100, p95_ns: float = 0, tokens: float = 0) -> dict:
+    def _make_current(self, error_count: int = 0, total: int = 100, p95_ns: float = 0, tokens: float = 0, retries: float = 0, turn_latency_ms: float = 0) -> dict:
         return {
             "aggregations": {
                 "error_count": {"doc_count": error_count},
@@ -385,16 +386,33 @@ class AlertDiagnoseLogicTests(unittest.TestCase):
                 "p95_latency": {"values": {"95.0": p95_ns}},
                 "token_sum": {"value": tokens * 0.6},
                 "token_output_sum": {"value": tokens * 0.4},
+                "retry_sum": {"value": retries},
                 "top_error_types": {"buckets": [{"key": "TimeoutError", "doc_count": error_count}]},
                 "top_error_tools": {"tools": {"buckets": [{"key": "web_search", "doc_count": error_count}]}},
                 "top_error_models": {"models": {"buckets": [{"key": "gpt-5", "doc_count": error_count}]}},
-                "top_token_tools": {"buckets": [{"key": "web_search", "token_sum": {"value": tokens}}]},
-                "top_token_models": {"buckets": [{"key": "gpt-5", "token_sum": {"value": tokens}}]},
-                "top_latency_tools": {"buckets": [{"key": "web_search", "doc_count": 10}]},
+                "top_failure_sessions": {"sessions": {"buckets": [{"key": "session-1", "doc_count": max(error_count - 1, 0)}]}},
+                "top_failure_components": {"components": {"buckets": [{"key": "tool", "doc_count": max(error_count - 1, 0)}]}},
+                "top_token_tools": {"buckets": [{"key": "web_search", "doc_count": 10, "token_sum": {"value": tokens}}]},
+                "top_token_models": {"buckets": [{"key": "gpt-5", "doc_count": 10, "token_sum": {"value": tokens}}]},
+                "top_latency_tools": {"buckets": [{"key": "web_search", "doc_count": 10, "p95": {"value": p95_ns}}]},
+                "top_retry_sessions": {"buckets": [{"key": "session-1", "doc_count": 8, "retry_sum": {"value": retries}}]},
+                "top_retry_tools": {"buckets": [{"key": "web_search", "doc_count": 8, "retry_sum": {"value": retries}}]},
+                "top_turns_by_latency": {
+                    "buckets": [
+                        {
+                            "key": "turn-1",
+                            "doc_count": 4,
+                            "avg_latency": {"value": turn_latency_ms},
+                            "sessions": {"buckets": [{"key": "session-1", "doc_count": 4}]},
+                            "components": {"buckets": [{"key": "tool", "doc_count": 4}]},
+                            "failure_count": {"doc_count": error_count},
+                        }
+                    ]
+                },
             }
         }
 
-    def _make_baseline(self, error_count: int = 2, total: int = 100, p95_ns: float = 1_000_000_000, tokens: float = 1000) -> dict:
+    def _make_baseline(self, error_count: int = 2, total: int = 100, p95_ns: float = 1_000_000_000, tokens: float = 1000, retries: float = 1) -> dict:
         return {
             "aggregations": {
                 "error_count": {"doc_count": error_count},
@@ -402,6 +420,7 @@ class AlertDiagnoseLogicTests(unittest.TestCase):
                 "p95_latency": {"values": {"95.0": p95_ns}},
                 "token_sum": {"value": tokens * 0.6},
                 "token_output_sum": {"value": tokens * 0.4},
+                "retry_sum": {"value": retries},
             }
         }
 
@@ -433,12 +452,37 @@ class AlertDiagnoseLogicTests(unittest.TestCase):
 
     def test_latency_degradation_triggers(self) -> None:
         result = alert_and_diagnose._analyze_latency_degradation(
-            self._make_current(p95_ns=10_000_000_000),  # 10s
+            self._make_current(p95_ns=10_000_000_000, turn_latency_ms=7200),  # 10s
             self._make_baseline(p95_ns=1_000_000_000),
             threshold_ms=5000,
         )
         self.assertIsNotNone(result)
         self.assertEqual(result["alert_type"], "latency_degradation")
+
+    def test_session_failure_hotspot_triggers(self) -> None:
+        result = alert_and_diagnose._analyze_session_failure_hotspot(
+            self._make_current(error_count=12, total=100),
+            threshold=10,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["alert_type"], "session_failure_hotspot")
+
+    def test_retry_storm_triggers(self) -> None:
+        result = alert_and_diagnose._analyze_retry_storm(
+            self._make_current(retries=12),
+            self._make_baseline(retries=2),
+            threshold=10,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["alert_type"], "retry_storm")
+
+    def test_long_turn_hotspot_triggers(self) -> None:
+        result = alert_and_diagnose._analyze_long_turn_hotspot(
+            self._make_current(turn_latency_ms=4200),
+            threshold_ms=5000,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["alert_type"], "long_turn_hotspot")
 
 
 class ValidateStateExtendedTests(unittest.TestCase):

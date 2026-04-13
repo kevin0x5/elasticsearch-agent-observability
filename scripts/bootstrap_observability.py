@@ -264,6 +264,8 @@ def build_summary(
             ("env", "elastic-native env"),
             ("launcher", "elastic-native launcher"),
             ("readme", "elastic-native readme"),
+            ("surface_manifest", "elastic-native surface manifest"),
+            ("preflight", "elastic-native preflight"),
             ("apm_env", "APM env"),
             ("apm_readme", "APM entrypoints"),
             ("rum_snippet", "RUM snippet"),
@@ -440,6 +442,7 @@ def main() -> int:
                 kibana_url=args.kibana_url.strip() or None,
                 kibana_space=args.kibana_space,
                 apply_kibana=args.apply_kibana_assets,
+                native_assets_dir=native_dir if native_assets_paths else None,
                 dry_run=args.dry_run,
             )
             apply_summary_path = assets_dir / "apply-summary.json"
@@ -484,6 +487,30 @@ def main() -> int:
                 notes.append(f"The apply summary contains a dry-run plan with {plan_count} operation(s); nothing was sent to Elasticsearch or Kibana.")
             else:
                 notes.append("Elasticsearch assets were applied to the target cluster, including template, pipeline, ILM policy, and optional write-index bootstrap.")
+        native_apply_summary = apply_summary.get("native_bundle") if isinstance(apply_summary, dict) else None
+        if native_apply_summary:
+            native_status = native_apply_summary.get("overall_status", "unknown")
+            failed_checks = int(native_apply_summary.get("failed_count", 0) or 0)
+            action_required = int(native_apply_summary.get("action_required_count", 0) or 0)
+            blocking_checks = native_apply_summary.get("blocking_checks", []) if isinstance(native_apply_summary, dict) else []
+            blocker_preview = "; ".join(
+                str(item.get("detail", "")).strip()
+                for item in blocking_checks[:2]
+                if str(item.get("detail", "")).strip()
+            )
+            if failed_checks:
+                message = f"Elastic-native preflight status: `{native_status}` with {failed_checks} failed check(s); review the Kibana / Fleet reachability before rollout."
+                if blocker_preview:
+                    message += f" Top blocker(s): {blocker_preview}"
+                notes.append(message)
+            elif action_required:
+                message = f"Elastic-native preflight status: `{native_status}` with {action_required} required operator action(s); fill the missing Fleet/APM/Kibana inputs before rollout."
+                if blocker_preview:
+                    message += f" Top blocker(s): {blocker_preview}"
+                notes.append(message)
+            else:
+                ready_count = int(native_apply_summary.get("ready_count", 0) or 0)
+                notes.append(f"Elastic-native preflight is ready with {ready_count} ready check(s); continue with runtime rollout and validate Kibana APM / Traces / Service Map / UX surfaces.")
         if args.apply_kibana_assets and not args.dry_run:
             notes.append("Kibana saved objects were applied, so the default human-facing observability surface now lives in Kibana dashboards / Discover entrypoints.")
         if report_output_arg and args.dry_run:

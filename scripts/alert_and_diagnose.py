@@ -10,9 +10,12 @@ Checks:
 1. Error rate spike — too many event.outcome:failure in the window
 2. Token consumption anomaly — total tokens exceed a dynamic threshold
 3. Latency degradation — P95 latency exceeds threshold
+4. Session failure hotspot — failures are concentrated in a small number of sessions
+5. Retry storm — retries are concentrated in a session or tool
+6. Long turn hotspot — a turn becomes much slower than the window baseline
 
 For each triggered alert, the script:
-- Queries the top contributing factors (which tool, model, error type)
+- Queries the top contributing factors (which tool, model, session, component)
 - Builds a root-cause hypothesis
 - Produces a structured JSON + human-readable summary with:
   - Phenomenon (what happened)
@@ -45,6 +48,9 @@ DEFAULT_TIME_RANGE = "now-15m"
 DEFAULT_ERROR_THRESHOLD = 10
 DEFAULT_P95_LATENCY_THRESHOLD_MS = 5000
 DEFAULT_TOKEN_THRESHOLD_MULTIPLIER = 3.0
+
+
+TERM_BUCKET_SIZE = 5
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,18 +87,53 @@ def _query_current_window(config: ESConfig, ds_name: str, time_range: str) -> di
             "p95_latency": {"percentiles": {"field": "event.duration", "percents": [95]}},
             "token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}},
             "token_output_sum": {"sum": {"field": "gen_ai.usage.output_tokens"}},
-            "top_error_types": {"terms": {"field": "gen_ai.agent.error_type", "size": 5}},
+            "retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}},
+            "top_error_types": {"terms": {"field": "gen_ai.agent.error_type", "size": TERM_BUCKET_SIZE}},
             "top_error_tools": {
                 "filter": {"term": {"event.outcome": "failure"}},
-                "aggs": {"tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": 5}}},
+                "aggs": {"tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE}}},
             },
             "top_error_models": {
                 "filter": {"term": {"event.outcome": "failure"}},
-                "aggs": {"models": {"terms": {"field": "gen_ai.agent.model_name", "size": 5}}},
+                "aggs": {"models": {"terms": {"field": "gen_ai.agent.model_name", "size": TERM_BUCKET_SIZE}}},
             },
-            "top_token_tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": 5, "order": {"token_sum": "desc"}}, "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}}},
-            "top_token_models": {"terms": {"field": "gen_ai.agent.model_name", "size": 5, "order": {"token_sum": "desc"}}, "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}}},
-            "top_latency_tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": 5, "order": {"p95": "desc"}}, "aggs": {"p95": {"percentiles": {"field": "event.duration", "percents": [95]}}}},
+            "top_failure_sessions": {
+                "filter": {"term": {"event.outcome": "failure"}},
+                "aggs": {"sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE}}},
+            },
+            "top_failure_components": {
+                "filter": {"term": {"event.outcome": "failure"}},
+                "aggs": {"components": {"terms": {"field": "gen_ai.agent.component_type", "size": TERM_BUCKET_SIZE}}},
+            },
+            "top_token_tools": {
+                "terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
+                "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}},
+            },
+            "top_token_models": {
+                "terms": {"field": "gen_ai.agent.model_name", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
+                "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}},
+            },
+            "top_latency_tools": {
+                "terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE, "order": {"p95": "desc"}},
+                "aggs": {"p95": {"percentiles": {"field": "event.duration", "percents": [95]}}},
+            },
+            "top_retry_sessions": {
+                "terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE, "order": {"retry_sum": "desc"}},
+                "aggs": {"retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}}},
+            },
+            "top_retry_tools": {
+                "terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE, "order": {"retry_sum": "desc"}},
+                "aggs": {"retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}}},
+            },
+            "top_turns_by_latency": {
+                "terms": {"field": "gen_ai.agent.turn_id", "size": TERM_BUCKET_SIZE, "order": {"avg_latency": "desc"}},
+                "aggs": {
+                    "avg_latency": {"avg": {"field": "gen_ai.agent.latency_ms"}},
+                    "sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": 1}},
+                    "components": {"terms": {"field": "gen_ai.agent.component_type", "size": 1}},
+                    "failure_count": {"filter": {"term": {"event.outcome": "failure"}}},
+                },
+            },
         },
     }
     return es_request(config, "POST", f"/{ds_name}*/_search", payload)
@@ -112,16 +153,47 @@ def _query_baseline_window(config: ESConfig, ds_name: str, baseline_range: str) 
             "p95_latency": {"percentiles": {"field": "event.duration", "percents": [95]}},
             "token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}},
             "token_output_sum": {"sum": {"field": "gen_ai.usage.output_tokens"}},
+            "retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}},
         },
     }
     return es_request(config, "POST", f"/{ds_name}*/_search", payload)
 
 
-def _extract_buckets(agg: dict[str, Any], sub_agg: str | None = None) -> list[dict[str, Any]]:
-    buckets = agg.get("buckets", [])
-    if sub_agg:
-        return [{"key": b.get("key"), "value": b.get(sub_agg, {}).get("value", 0)} for b in buckets]
-    return [{"key": b.get("key"), "count": b.get("doc_count", 0)} for b in buckets]
+def _extract_terms(agg: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{"key": b.get("key"), "count": b.get("doc_count", 0)} for b in agg.get("buckets", [])]
+
+
+def _extract_value_terms(agg: dict[str, Any], value_agg: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": b.get("key"),
+            "count": b.get("doc_count", 0),
+            "value": b.get(value_agg, {}).get("value", 0) or 0,
+        }
+        for b in agg.get("buckets", [])
+    ]
+
+
+def _extract_nested_terms(agg: dict[str, Any], bucket_name: str) -> list[dict[str, Any]]:
+    return _extract_terms(agg.get(bucket_name, {}))
+
+
+def _extract_turns(agg: dict[str, Any]) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for bucket in agg.get("buckets", []):
+        session_bucket = (bucket.get("sessions", {}).get("buckets", []) or [{}])[0]
+        component_bucket = (bucket.get("components", {}).get("buckets", []) or [{}])[0]
+        turns.append(
+            {
+                "key": bucket.get("key"),
+                "count": bucket.get("doc_count", 0),
+                "avg_latency_ms": round(bucket.get("avg_latency", {}).get("value", 0) or 0, 2),
+                "failure_count": bucket.get("failure_count", {}).get("doc_count", 0),
+                "session_id": session_bucket.get("key"),
+                "component_type": component_bucket.get("key"),
+            }
+        )
+    return turns
 
 
 def _analyze_error_spike(current: dict[str, Any], baseline: dict[str, Any], threshold: int) -> dict[str, Any] | None:
@@ -134,19 +206,30 @@ def _analyze_error_spike(current: dict[str, Any], baseline: dict[str, Any], thre
     baseline_errors = baseline.get("aggregations", {}).get("error_count", {}).get("doc_count", 0)
     baseline_total = baseline.get("aggregations", {}).get("total_events", {}).get("value", 0)
     baseline_rate = round(baseline_errors / max(1, baseline_total), 4)
-    top_types = _extract_buckets(aggs.get("top_error_types", {}))
-    top_tools = _extract_buckets(aggs.get("top_error_tools", {}).get("tools", {}))
-    top_models = _extract_buckets(aggs.get("top_error_models", {}).get("models", {}))
+    top_types = _extract_terms(aggs.get("top_error_types", {}))
+    top_tools = _extract_nested_terms(aggs.get("top_error_tools", {}), "tools")
+    top_models = _extract_nested_terms(aggs.get("top_error_models", {}), "models")
+    top_sessions = _extract_nested_terms(aggs.get("top_failure_sessions", {}), "sessions")
     primary_type = top_types[0]["key"] if top_types else "unknown"
     primary_tool = top_tools[0]["key"] if top_tools else "unknown"
     primary_model = top_models[0]["key"] if top_models else "unknown"
+    primary_session = top_sessions[0]["key"] if top_sessions else "unknown"
+    issue_hint = "a downstream dependency failure" if "timeout" in str(primary_type).lower() or "connection" in str(primary_type).lower() else "an application-level issue in the tool or model integration"
     return {
         "alert_type": "error_rate_spike",
         "severity": "critical" if error_rate > 0.5 else "warning",
         "phenomenon": f"Error rate spiked to {error_rate:.1%} ({error_count} errors in window) vs baseline {baseline_rate:.1%}.",
-        "root_cause": f"Top error type is `{primary_type}`, mainly from tool `{primary_tool}` using model `{primary_model}`. This pattern suggests {'a downstream dependency failure' if 'timeout' in primary_type.lower() or 'connection' in primary_type.lower() else 'an application-level issue in the tool or model integration'}.",
-        "recommendation": f"1. Check `{primary_tool}` for recent changes or dependency failures. 2. Inspect `{primary_model}` availability/quota. 3. Review the top {len(top_types)} error types for a common upstream cause.",
-        "evidence": {"error_count": error_count, "error_rate": error_rate, "baseline_rate": baseline_rate, "top_error_types": top_types, "top_error_tools": top_tools, "top_error_models": top_models},
+        "root_cause": f"Top error type is `{primary_type}`, mainly from tool `{primary_tool}` using model `{primary_model}` and concentrated in session `{primary_session}`. This pattern suggests {issue_hint}.",
+        "recommendation": f"1. Check `{primary_tool}` for recent changes or dependency failures. 2. Inspect `{primary_model}` availability/quota. 3. Drill into session `{primary_session}` to confirm whether the failures share one conversation path.",
+        "evidence": {
+            "error_count": error_count,
+            "error_rate": error_rate,
+            "baseline_rate": baseline_rate,
+            "top_error_types": top_types,
+            "top_error_tools": top_tools,
+            "top_error_models": top_models,
+            "top_failure_sessions": top_sessions,
+        },
     }
 
 
@@ -158,17 +241,26 @@ def _analyze_token_anomaly(current: dict[str, Any], baseline: dict[str, Any], mu
     if baseline_tokens <= 0 or current_tokens <= baseline_tokens * multiplier:
         return None
     ratio = round(current_tokens / max(1, baseline_tokens), 2)
-    top_tools = _extract_buckets(aggs.get("top_token_tools", {}), sub_agg="token_sum")
-    top_models = _extract_buckets(aggs.get("top_token_models", {}), sub_agg="token_sum")
+    top_tools = _extract_value_terms(aggs.get("top_token_tools", {}), value_agg="token_sum")
+    top_models = _extract_value_terms(aggs.get("top_token_models", {}), value_agg="token_sum")
+    top_sessions = _extract_value_terms(aggs.get("top_retry_sessions", {}), value_agg="retry_sum")
     primary_tool = top_tools[0]["key"] if top_tools else "unknown"
     primary_model = top_models[0]["key"] if top_models else "unknown"
+    primary_session = top_sessions[0]["key"] if top_sessions else "unknown"
     return {
         "alert_type": "token_consumption_anomaly",
         "severity": "warning" if ratio < 5 else "critical",
         "phenomenon": f"Token consumption is {ratio}x the baseline ({current_tokens:,.0f} vs {baseline_tokens:,.0f} baseline tokens in comparable windows).",
-        "root_cause": f"Tool `{primary_tool}` with model `{primary_model}` is the top consumer. This could indicate {'a retry storm or infinite loop' if ratio > 5 else 'increased workload or prompt bloat'}.",
-        "recommendation": f"1. Check if `{primary_tool}` is retrying excessively. 2. Review recent prompt changes for `{primary_model}`. 3. Consider adding a per-turn token budget or circuit breaker.",
-        "evidence": {"current_tokens": current_tokens, "baseline_tokens": baseline_tokens, "ratio": ratio, "top_tools": top_tools, "top_models": top_models},
+        "root_cause": f"Tool `{primary_tool}` with model `{primary_model}` is the top consumer, and session `{primary_session}` also shows abnormal retry concentration. This could indicate {'a retry storm or looped turn' if ratio > 5 else 'increased workload or prompt bloat'}.",
+        "recommendation": f"1. Check whether `{primary_tool}` is re-entering the same turn repeatedly. 2. Review recent prompt changes for `{primary_model}`. 3. Consider adding a per-turn token budget or circuit breaker for session `{primary_session}`.",
+        "evidence": {
+            "current_tokens": current_tokens,
+            "baseline_tokens": baseline_tokens,
+            "ratio": ratio,
+            "top_tools": top_tools,
+            "top_models": top_models,
+            "top_retry_sessions": top_sessions,
+        },
     }
 
 
@@ -181,15 +273,109 @@ def _analyze_latency_degradation(current: dict[str, Any], baseline: dict[str, An
         return None
     baseline_p95_ns = b_aggs.get("p95_latency", {}).get("values", {}).get("95.0", 0) or 0
     baseline_p95_ms = baseline_p95_ns / 1_000_000
-    top_tools = _extract_buckets(aggs.get("top_latency_tools", {}))
+    top_tools = _extract_value_terms(aggs.get("top_latency_tools", {}), value_agg="p95")
+    top_turns = _extract_turns(aggs.get("top_turns_by_latency", {}))
     primary_tool = top_tools[0]["key"] if top_tools else "unknown"
+    primary_turn = top_turns[0]["key"] if top_turns else "unknown"
+    primary_session = top_turns[0].get("session_id") if top_turns else "unknown"
     return {
         "alert_type": "latency_degradation",
         "severity": "warning" if p95_ms < threshold_ms * 2 else "critical",
         "phenomenon": f"P95 latency is {p95_ms:,.0f}ms (threshold: {threshold_ms:,.0f}ms, baseline: {baseline_p95_ms:,.0f}ms).",
-        "root_cause": f"Tool `{primary_tool}` is the top contributor to high latency. This usually means {'a slow downstream API or model endpoint' if p95_ms > 10000 else 'increased concurrency or resource contention'}.",
-        "recommendation": f"1. Profile `{primary_tool}` call duration. 2. Check model endpoint response times. 3. Consider request-level timeouts or caching.",
-        "evidence": {"p95_ms": round(p95_ms, 1), "baseline_p95_ms": round(baseline_p95_ms, 1), "threshold_ms": threshold_ms, "top_latency_tools": top_tools},
+        "root_cause": f"Tool `{primary_tool}` is the top contributor and turn `{primary_turn}` in session `{primary_session}` is one of the slowest turns. This usually means {'a slow downstream API or model endpoint' if p95_ms > 10000 else 'increased concurrency or resource contention'}.",
+        "recommendation": f"1. Profile `{primary_tool}` call duration. 2. Inspect slow turn `{primary_turn}` in session `{primary_session}`. 3. Consider request-level timeouts or caching for the slow path.",
+        "evidence": {
+            "p95_ms": round(p95_ms, 1),
+            "baseline_p95_ms": round(baseline_p95_ms, 1),
+            "threshold_ms": threshold_ms,
+            "top_latency_tools": top_tools,
+            "top_turns": top_turns,
+        },
+    }
+
+
+def _analyze_session_failure_hotspot(current: dict[str, Any], threshold: int) -> dict[str, Any] | None:
+    aggs = current.get("aggregations", {})
+    total_failures = aggs.get("error_count", {}).get("doc_count", 0)
+    failed_sessions = _extract_nested_terms(aggs.get("top_failure_sessions", {}), "sessions")
+    failed_components = _extract_nested_terms(aggs.get("top_failure_components", {}), "components")
+    if not failed_sessions:
+        return None
+    hottest_session = failed_sessions[0]
+    session_failures = hottest_session.get("count", 0)
+    concentration = session_failures / max(1, total_failures)
+    if session_failures < max(3, threshold // 2) or concentration < 0.35:
+        return None
+    primary_component = failed_components[0]["key"] if failed_components else "unknown"
+    return {
+        "alert_type": "session_failure_hotspot",
+        "severity": "critical" if concentration >= 0.6 else "warning",
+        "phenomenon": f"Session `{hottest_session.get('key')}` accounts for {session_failures}/{max(1, total_failures)} failures in the current window ({concentration:.1%}).",
+        "root_cause": f"Failures are unusually concentrated in one conversation path, with component `{primary_component}` showing up most often. This usually means a single bad workflow branch, poisoned state, or repeated bad tool/model handoff inside the session.",
+        "recommendation": f"1. Open session `{hottest_session.get('key')}` in Discover. 2. Compare the failing turns against successful sessions. 3. Check whether component `{primary_component}` starts the cascade or only fails downstream.",
+        "evidence": {
+            "total_failures": total_failures,
+            "session_failures": session_failures,
+            "concentration": round(concentration, 4),
+            "top_failure_sessions": failed_sessions,
+            "top_failure_components": failed_components,
+        },
+    }
+
+
+def _analyze_retry_storm(current: dict[str, Any], baseline: dict[str, Any], threshold: int) -> dict[str, Any] | None:
+    aggs = current.get("aggregations", {})
+    b_aggs = baseline.get("aggregations", {})
+    total_retries = aggs.get("retry_sum", {}).get("value", 0) or 0
+    baseline_retries = b_aggs.get("retry_sum", {}).get("value", 0) or 0
+    retry_sessions = _extract_value_terms(aggs.get("top_retry_sessions", {}), value_agg="retry_sum")
+    retry_tools = _extract_value_terms(aggs.get("top_retry_tools", {}), value_agg="retry_sum")
+    if not retry_sessions:
+        return None
+    hottest_session = retry_sessions[0]
+    hottest_tool = retry_tools[0] if retry_tools else {"key": "unknown", "value": 0}
+    retry_value = hottest_session.get("value", 0)
+    baseline_multiplier = total_retries / max(1, baseline_retries) if baseline_retries else float(total_retries)
+    if retry_value < max(4, threshold // 2) and total_retries < max(6, threshold):
+        return None
+    return {
+        "alert_type": "retry_storm",
+        "severity": "critical" if retry_value >= max(10, threshold) else "warning",
+        "phenomenon": f"Retries are concentrated in session `{hottest_session.get('key')}` ({retry_value:.0f} retries; total retries this window: {total_retries:.0f}).",
+        "root_cause": f"Tool `{hottest_tool.get('key')}` is the main retry source. Compared with baseline, retry pressure changed by about {baseline_multiplier:.2f}x, which strongly suggests a retry storm, looped tool invocation, or missing circuit breaker.",
+        "recommendation": f"1. Inspect the retry loop in session `{hottest_session.get('key')}`. 2. Add retry budget / backoff around `{hottest_tool.get('key')}`. 3. Check whether the tool is retrying due to an upstream model or network error.",
+        "evidence": {
+            "total_retries": total_retries,
+            "baseline_retries": baseline_retries,
+            "baseline_multiplier": round(baseline_multiplier, 2),
+            "top_retry_sessions": retry_sessions,
+            "top_retry_tools": retry_tools,
+        },
+    }
+
+
+def _analyze_long_turn_hotspot(current: dict[str, Any], threshold_ms: float) -> dict[str, Any] | None:
+    aggs = current.get("aggregations", {})
+    top_turns = _extract_turns(aggs.get("top_turns_by_latency", {}))
+    if not top_turns:
+        return None
+    slowest_turn = top_turns[0]
+    avg_latency_ms = slowest_turn.get("avg_latency_ms", 0)
+    if avg_latency_ms < max(1000, threshold_ms * 0.6):
+        return None
+    component_type = slowest_turn.get("component_type") or "unknown"
+    session_id = slowest_turn.get("session_id") or "unknown"
+    return {
+        "alert_type": "long_turn_hotspot",
+        "severity": "critical" if avg_latency_ms >= threshold_ms * 1.5 else "warning",
+        "phenomenon": f"Turn `{slowest_turn.get('key')}` in session `{session_id}` averages {avg_latency_ms:,.0f}ms and is the slowest turn in the window.",
+        "root_cause": f"Component `{component_type}` dominates this turn's slow path. Long-turn hotspots usually come from one stalled tool/model step, not uniform system slowdown.",
+        "recommendation": f"1. Drill into turn `{slowest_turn.get('key')}` and compare child spans. 2. Check whether component `{component_type}` is waiting on a model/tool dependency. 3. Add per-turn timeout or partial-fail handling if this path is user-facing.",
+        "evidence": {
+            "top_turns": top_turns,
+            "slowest_turn": slowest_turn,
+            "threshold_ms": threshold_ms,
+        },
     }
 
 
@@ -207,15 +393,16 @@ def run_alert_check(
     current = _query_current_window(config, ds_name, time_range)
     baseline = _query_baseline_window(config, ds_name, baseline_range)
     alerts: list[dict[str, Any]] = []
-    error_alert = _analyze_error_spike(current, baseline, error_threshold)
-    if error_alert:
-        alerts.append(error_alert)
-    token_alert = _analyze_token_anomaly(current, baseline, token_threshold_multiplier)
-    if token_alert:
-        alerts.append(token_alert)
-    latency_alert = _analyze_latency_degradation(current, baseline, p95_latency_threshold_ms)
-    if latency_alert:
-        alerts.append(latency_alert)
+    for alert in [
+        _analyze_error_spike(current, baseline, error_threshold),
+        _analyze_token_anomaly(current, baseline, token_threshold_multiplier),
+        _analyze_latency_degradation(current, baseline, p95_latency_threshold_ms),
+        _analyze_session_failure_hotspot(current, error_threshold),
+        _analyze_retry_storm(current, baseline, error_threshold),
+        _analyze_long_turn_hotspot(current, p95_latency_threshold_ms),
+    ]:
+        if alert:
+            alerts.append(alert)
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "index_prefix": index_prefix,
@@ -229,6 +416,7 @@ def run_alert_check(
 
 def _send_webhook(url: str, payload: dict[str, Any]) -> None:
     import urllib.request
+
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
@@ -243,6 +431,10 @@ def _write_alert_to_es(config: ESConfig, index_prefix: str, result: dict[str, An
     """Write alert check results back to ES as a .alerts data stream for Kibana consumption."""
     alerts_ds = f"{index_prefix}-alerts"
     for alert in result.get("alerts", []):
+        evidence = alert.get("evidence", {})
+        top_sessions = evidence.get("top_failure_sessions") or evidence.get("top_retry_sessions") or []
+        top_turns = evidence.get("top_turns") or []
+        top_components = evidence.get("top_failure_components") or []
         doc = {
             "@timestamp": result["checked_at"],
             "event.kind": "alert",
@@ -257,6 +449,12 @@ def _write_alert_to_es(config: ESConfig, index_prefix: str, result: dict[str, An
             "alert.recommendation": alert["recommendation"],
             "message": f"[{alert['severity'].upper()}] {alert['alert_type']}: {alert['phenomenon']}",
         }
+        if top_sessions:
+            doc["gen_ai.agent.session_id"] = top_sessions[0].get("key")
+        if top_turns:
+            doc["gen_ai.agent.turn_id"] = top_turns[0].get("key")
+        if top_components:
+            doc["gen_ai.agent.component_type"] = top_components[0].get("key")
         try:
             es_request(config, "POST", f"/{alerts_ds}/_doc", doc)
         except SkillError as exc:
@@ -320,8 +518,10 @@ def _store_to_insight(*, store_script: str, result: dict[str, Any], es_url: str,
             tmp_path = tmp.name
 
         cmd = [
-            sys.executable, str(store_path),
-            "--es-url", es_url,
+            sys.executable,
+            str(store_path),
+            "--es-url",
+            es_url,
         ]
         if es_user:
             cmd.extend(["--es-user", es_user])
@@ -329,9 +529,12 @@ def _store_to_insight(*, store_script: str, result: dict[str, Any], es_url: str,
             cmd.extend(["--es-pass", es_password])
         cmd.extend([
             "store",
-            "--title", title,
-            "--tags", tags,
-            "--file", tmp_path,
+            "--title",
+            title,
+            "--tags",
+            tags,
+            "--file",
+            tmp_path,
         ])
 
         try:
@@ -375,13 +578,15 @@ def render_text(result: dict[str, Any]) -> str:
         return f"✅ [{result['checked_at']}] No alerts triggered. ({result['time_range']})"
     lines = [f"🚨 [{result['checked_at']}] {result['alert_count']} alert(s) triggered ({result['time_range']})", ""]
     for alert in result["alerts"]:
-        lines.extend([
-            f"--- [{alert['severity'].upper()}] {alert['alert_type']} ---",
-            f"Phenomenon: {alert['phenomenon']}",
-            f"Root cause:  {alert['root_cause']}",
-            f"Recommendation: {alert['recommendation']}",
-            "",
-        ])
+        lines.extend(
+            [
+                f"--- [{alert['severity'].upper()}] {alert['alert_type']} ---",
+                f"Phenomenon: {alert['phenomenon']}",
+                f"Root cause:  {alert['root_cause']}",
+                f"Recommendation: {alert['recommendation']}",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -390,16 +595,18 @@ def render_markdown(result: dict[str, Any]) -> str:
         return f"# ✅ No alerts\n\nChecked at `{result['checked_at']}` for window `{result['time_range']}`.\n"
     lines = [f"# 🚨 {result['alert_count']} Alert(s)", "", f"- checked_at: `{result['checked_at']}`", f"- window: `{result['time_range']}`", ""]
     for alert in result["alerts"]:
-        lines.extend([
-            f"## [{alert['severity'].upper()}] {alert['alert_type']}",
-            "",
-            f"**Phenomenon**: {alert['phenomenon']}",
-            "",
-            f"**Root cause**: {alert['root_cause']}",
-            "",
-            f"**Recommendation**: {alert['recommendation']}",
-            "",
-        ])
+        lines.extend(
+            [
+                f"## [{alert['severity'].upper()}] {alert['alert_type']}",
+                "",
+                f"**Phenomenon**: {alert['phenomenon']}",
+                "",
+                f"**Root cause**: {alert['root_cause']}",
+                "",
+                f"**Recommendation**: {alert['recommendation']}",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 

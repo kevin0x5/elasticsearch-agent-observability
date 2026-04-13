@@ -7,11 +7,12 @@ The primary human-facing surface is **Kibana**.
 In the current version, that specifically means:
 
 - a data view
-- a saved search entry surface
-- an asset bundle that can be applied through the API or imported via `kibana-saved-objects.ndjson`
+- saved searches for the event stream, failures, and session drilldown
+- a session-first dashboard bundle that can be applied through the API or imported via `kibana-saved-objects.ndjson`
+- Lens visualizations for event rate, latency, session hotspots, component hotspots, tool distribution, and token usage
 
-That is a usable Kibana starting point.
-It is not yet a full dashboard suite.
+That is now a stronger Kibana starting point.
+It is still not a full platform-grade dashboard suite.
 
 ## Smoke And Machine Outputs
 
@@ -35,12 +36,17 @@ Keep the reporting language aligned with what the repo really emits today:
 - token input total
 - token output total
 - cost total
+- top sessions
+- failed sessions
+- slow turns
+- top components
+- failed components
 - top tools
 - top models
 - MCP methods
 - error types
 
-Do not claim retry breakdown or timeout breakdown unless the implementation actually emits them.
+Do not claim model-fallback analysis, guardrail drilldown, or evaluation regression unless the implementation actually emits them.
 
 ## Time Field Contract
 

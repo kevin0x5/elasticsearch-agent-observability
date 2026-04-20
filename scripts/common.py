@@ -6,7 +6,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -44,6 +46,12 @@ class ESConfig:
     timeout_seconds: int = 15
     verify_tls: bool = True
     kibana_api_key: str | None = None
+    max_retries: int = 2  # total attempts = max_retries + 1
+    retry_backoff_seconds: float = 0.5
+
+
+IDEMPOTENT_METHODS = {"GET", "HEAD", "PUT", "DELETE"}
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 def utcnow_iso() -> str:
@@ -185,30 +193,49 @@ def print_info(message: str) -> None:
 
 
 def es_request(config: ESConfig, method: str, path: str, payload: dict | None = None) -> dict:
+    """Send a request to Elasticsearch with bounded retries on transient failures.
+
+    Idempotent methods (GET/HEAD/PUT/DELETE) retry on 429/5xx and network errors.
+    POST retries only on network errors — we do not retry 5xx for POST to avoid
+    double-indexing documents.
+    """
     url = config.es_url.rstrip("/") + path
-    request = urllib.request.Request(url, method=method.upper())
-    request.add_header("Content-Type", "application/json")
-    if config.es_user and config.es_password:
-        token = base64.b64encode(f"{config.es_user}:{config.es_password}".encode("utf-8")).decode("ascii")
-        request.add_header("Authorization", f"Basic {token}")
-    body = None
-    if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-    import ssl
+    upper_method = method.upper()
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
     context = None
     if not config.verify_tls:
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-    try:
-        with urllib.request.urlopen(request, data=body, timeout=config.timeout_seconds, context=context) as response:  # noqa: S310
-            text = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="ignore")
-        raise SkillError(f"Elasticsearch HTTP {exc.code}: {detail or exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        raise SkillError(f"Unable to reach Elasticsearch: {exc.reason}") from exc
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise SkillError(f"Invalid JSON response from Elasticsearch: {text[:200]}") from exc
+
+    attempts = max(1, config.max_retries + 1)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        request = urllib.request.Request(url, method=upper_method)
+        request.add_header("Content-Type", "application/json")
+        if config.es_user and config.es_password:
+            token = base64.b64encode(f"{config.es_user}:{config.es_password}".encode("utf-8")).decode("ascii")
+            request.add_header("Authorization", f"Basic {token}")
+        try:
+            with urllib.request.urlopen(request, data=body, timeout=config.timeout_seconds, context=context) as response:  # noqa: S310
+                text = response.read().decode("utf-8")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise SkillError(f"Invalid JSON response from Elasticsearch: {text[:200]}") from exc
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="ignore")
+            retryable = upper_method in IDEMPOTENT_METHODS and exc.code in RETRYABLE_STATUS
+            if retryable and attempt < attempts - 1:
+                time.sleep(config.retry_backoff_seconds * (2 ** attempt))
+                last_exc = exc
+                continue
+            raise SkillError(f"Elasticsearch HTTP {exc.code}: {detail or exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            if attempt < attempts - 1:
+                time.sleep(config.retry_backoff_seconds * (2 ** attempt))
+                last_exc = exc
+                continue
+            raise SkillError(f"Unable to reach Elasticsearch: {exc.reason}") from exc
+    # Defensive fallback; the loop above always either returns or raises.
+    raise SkillError(f"Elasticsearch request failed after {attempts} attempts: {last_exc}")

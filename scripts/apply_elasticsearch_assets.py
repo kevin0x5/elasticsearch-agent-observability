@@ -38,26 +38,31 @@ PLACEHOLDER_HOST_MARKERS = (
 
 
 def sanity_check(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
-    """Write a test document, refresh, query, and delete it to verify the pipeline is working end-to-end."""
-    import time
+    """Write a test document, refresh, query, and delete it to verify the pipeline is working end-to-end.
+
+    The sanity doc is tagged with ``event.dataset = "internal.sanity_check"`` so that
+    alert/report aggregations can filter it out and not count it as a real agent event.
+    Cleanup is done in a ``finally`` block so a failed search still tries to delete the doc.
+    """
     ds_name = build_data_stream_name(index_prefix)
     test_doc = {
         "@timestamp": datetime.now(timezone.utc).isoformat(),
         "event.action": "_sanity_check",
         "event.kind": "event",
         "event.outcome": "success",
+        "event.dataset": "internal.sanity_check",
         "service.name": "sanity-check",
         "gen_ai.agent.tool_name": "_sanity_check_tool",
         "gen_ai.agent.signal_type": "sanity_check",
         "message": "End-to-end sanity check document",
     }
+    doc_id = ""
     try:
         index_result = es_request(config, "POST", f"/{ds_name}/_doc", test_doc)
         doc_id = index_result.get("_id", "")
         if not doc_id:
             return {"status": "failed", "reason": "Index returned no _id", "detail": index_result}
         es_request(config, "POST", f"/{ds_name}/_refresh")
-        time.sleep(0.5)
         query = {"query": {"term": {"event.action": "_sanity_check"}}, "size": 1}
         search_result = es_request(config, "POST", f"/{ds_name}/_search", query)
         hits = search_result.get("hits", {}).get("total", {}).get("value", 0)
@@ -65,7 +70,6 @@ def sanity_check(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
             return {"status": "failed", "reason": "Sanity check doc not found after indexing", "doc_id": doc_id}
         found_doc = search_result["hits"]["hits"][0]["_source"]
         pipeline_applied = found_doc.get("observer.product") == "elasticsearch-agent-observability"
-        es_request(config, "POST", f"/{ds_name}/_delete_by_query", {"query": {"term": {"event.action": "_sanity_check"}}})
         return {
             "status": "passed",
             "doc_id": doc_id,
@@ -73,7 +77,19 @@ def sanity_check(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
             "indexed_fields_sample": list(found_doc.keys())[:10],
         }
     except SkillError as exc:
-        return {"status": "failed", "reason": str(exc)}
+        return {"status": "failed", "reason": str(exc), "doc_id": doc_id}
+    finally:
+        if doc_id:
+            try:
+                es_request(
+                    config,
+                    "POST",
+                    f"/{ds_name}/_delete_by_query?refresh=true",
+                    {"query": {"term": {"event.action": "_sanity_check"}}},
+                )
+            except SkillError:
+                # Best-effort cleanup; the dataset tag still lets consumers filter.
+                pass
 
 
 def parse_args() -> argparse.Namespace:

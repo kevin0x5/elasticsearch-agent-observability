@@ -10,3 +10,6 @@ venv/
 .vscode/
 *.swp
 *~
+
+# discussion tree (auto-maintained by tree-of-discussion skill)
+.discussion/

@@ -291,13 +291,17 @@ class ContractsAndSecurityTests(unittest.TestCase):
 
     def test_search_payload_uses_ecs_fields_by_default(self) -> None:
         payload = generate_report.search_payload("now-24h")
-        self.assertIn("@timestamp", payload["query"]["range"])
+        range_clause = payload["query"]["bool"]["filter"][0]["range"]
+        self.assertIn("@timestamp", range_clause)
         self.assertIn("gen_ai.agent.tool_name", str(payload["aggs"]))
+        must_not = payload["query"]["bool"]["must_not"]
+        self.assertTrue(any(clause.get("term", {}).get("event.dataset") == "internal.sanity_check" for clause in must_not))
 
     def test_search_payload_uses_custom_time_field(self) -> None:
         payload = generate_report.search_payload("now-24h", time_field="event.ingested")
-        self.assertIn("event.ingested", payload["query"]["range"])
-        self.assertNotIn("@timestamp", payload["query"]["range"])
+        range_clause = payload["query"]["bool"]["filter"][0]["range"]
+        self.assertIn("event.ingested", range_clause)
+        self.assertNotIn("@timestamp", range_clause)
 
     def test_iter_text_files_ignores_generated_reference_and_test_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -80,7 +80,12 @@ def _query_current_window(config: ESConfig, ds_name: str, time_range: str) -> di
     """Query current window stats."""
     payload = {
         "size": 0,
-        "query": {"range": {"@timestamp": {"gte": time_range}}},
+        "query": {
+            "bool": {
+                "filter": [{"range": {"@timestamp": {"gte": time_range}}}],
+                "must_not": [{"term": {"event.dataset": "internal.sanity_check"}}],
+            }
+        },
         "aggs": {
             "error_count": {"filter": {"term": {"event.outcome": "failure"}}},
             "total_events": {"value_count": {"field": "@timestamp"}},
@@ -140,13 +145,24 @@ def _query_current_window(config: ESConfig, ds_name: str, time_range: str) -> di
 
 
 def _query_baseline_window(config: ESConfig, ds_name: str, baseline_range: str) -> dict[str, Any]:
-    """Query baseline window for comparison."""
-    parts = baseline_range.split("/")
+    """Query baseline window for comparison.
+
+    Accepts either ``"<gte>/<lte>"`` (e.g. ``"now-24h/now-15m"``) or a single
+    anchor like ``"now-24h"``. In the single-anchor form the upper bound falls
+    back to ``"now"`` so the baseline really covers everything up to now,
+    instead of silently inheriting the current window's lower bound.
+    """
+    parts = [segment.strip() for segment in baseline_range.split("/") if segment.strip()]
     gte = parts[0] if parts else "now-24h"
-    lte = parts[1] if len(parts) > 1 else "now-15m"
+    lte = parts[1] if len(parts) > 1 else "now"
     payload = {
         "size": 0,
-        "query": {"range": {"@timestamp": {"gte": gte, "lte": lte}}},
+        "query": {
+            "bool": {
+                "filter": [{"range": {"@timestamp": {"gte": gte, "lte": lte}}}],
+                "must_not": [{"term": {"event.dataset": "internal.sanity_check"}}],
+            }
+        },
         "aggs": {
             "error_count": {"filter": {"term": {"event.outcome": "failure"}}},
             "total_events": {"value_count": {"field": "@timestamp"}},
@@ -428,9 +444,27 @@ def _send_webhook(url: str, payload: dict[str, Any]) -> None:
 
 
 def _write_alert_to_es(config: ESConfig, index_prefix: str, result: dict[str, Any]) -> None:
-    """Write alert check results back to ES as a .alerts data stream for Kibana consumption."""
-    alerts_ds = f"{index_prefix}-alerts"
-    for alert in result.get("alerts", []):
+    """Write alert check results back into the events data stream.
+
+    The alerts land in the same ``<prefix>-events`` data stream that already has the
+    index template, ILM, and Kibana saved objects wired up. They are distinguished
+    from raw agent events by ``event.kind: "alert"`` and tagged with
+    ``event.dataset: "internal.alert_check"`` so aggregations can filter them.
+
+    Data streams require ``_create`` (or a ``create`` bulk op); ``_doc`` returns 400
+    against a data stream in ES 9.x, which used to silently lose alerts.
+    """
+    events_ds = build_data_stream_name(index_prefix)
+    alerts = result.get("alerts", []) or []
+
+    def _write(doc: dict[str, Any]) -> None:
+        doc.setdefault("event.dataset", "internal.alert_check")
+        try:
+            es_request(config, "POST", f"/{events_ds}/_create", doc)
+        except SkillError as exc:
+            print(f"⚠️ failed to write alert to ES: {exc}", file=sys.stderr)
+
+    for alert in alerts:
         evidence = alert.get("evidence", {})
         top_sessions = evidence.get("top_failure_sessions") or evidence.get("top_retry_sessions") or []
         top_turns = evidence.get("top_turns") or []
@@ -455,25 +489,21 @@ def _write_alert_to_es(config: ESConfig, index_prefix: str, result: dict[str, An
             doc["gen_ai.agent.turn_id"] = top_turns[0].get("key")
         if top_components:
             doc["gen_ai.agent.component_type"] = top_components[0].get("key")
-        try:
-            es_request(config, "POST", f"/{alerts_ds}/_doc", doc)
-        except SkillError as exc:
-            print(f"⚠️ failed to write alert to ES: {exc}", file=sys.stderr)
-    if not result.get("alerts"):
-        doc = {
-            "@timestamp": result["checked_at"],
-            "event.kind": "alert",
-            "event.category": "process",
-            "event.action": "alert_check_ok",
-            "event.outcome": "success",
-            "service.name": "alert-and-diagnose",
-            "gen_ai.agent.signal_type": "alert_check",
-            "message": "No alerts triggered",
-        }
-        try:
-            es_request(config, "POST", f"/{alerts_ds}/_doc", doc)
-        except SkillError as exc:
-            print(f"⚠️ failed to write alert status to ES: {exc}", file=sys.stderr)
+        _write(doc)
+
+    if not alerts:
+        _write(
+            {
+                "@timestamp": result["checked_at"],
+                "event.kind": "alert",
+                "event.category": "process",
+                "event.action": "alert_check_ok",
+                "event.outcome": "success",
+                "service.name": "alert-and-diagnose",
+                "gen_ai.agent.signal_type": "alert_check",
+                "message": "No alerts triggered",
+            }
+        )
 
 
 def _store_to_insight(*, store_script: str, result: dict[str, Any], es_url: str, es_user: str, es_password: str) -> None:

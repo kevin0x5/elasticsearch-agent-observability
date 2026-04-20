@@ -40,7 +40,12 @@ def parse_args() -> argparse.Namespace:
 def search_payload(time_range: str, time_field: str = "@timestamp") -> dict[str, Any]:
     return {
         "size": 0,
-        "query": {"range": {time_field: {"gte": time_range}}},
+        "query": {
+            "bool": {
+                "filter": [{"range": {time_field: {"gte": time_range}}}],
+                "must_not": [{"term": {"event.dataset": "internal.sanity_check"}}],
+            }
+        },
         "aggs": {
             "with_errors": {"filter": {"term": {"event.outcome": "failure"}}},
             "tool_calls": {"filter": {"exists": {"field": "gen_ai.agent.tool_name"}}},

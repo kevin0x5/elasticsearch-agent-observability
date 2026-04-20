@@ -30,6 +30,7 @@ from render_es_assets import render_assets
 from render_instrument_snippet import render_snippet_to_file
 from render_llm_proxy_starter import render_llm_proxy_bundle
 from render_otlp_http_bridge import render_bridge_script
+from verify_pipeline import run_verify as run_verify_pipeline, render_text as render_verify_text
 
 DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:4317"
 DEFAULT_COLLECTOR_BIN = "otelcol-contrib"
@@ -82,6 +83,24 @@ def parse_args() -> argparse.Namespace:
         help="Generate an llm-proxy/ docker-compose bundle (LiteLLM) for zero-code observability of upstream agents (e.g. OpenClaw).",
     )
     parser.add_argument("--llm-proxy-port", type=int, default=4000, help="Host port the LLM proxy listens on")
+    parser.add_argument(
+        "--verify",
+        dest="verify",
+        action="store_true",
+        default=True,
+        help="After apply, run an end-to-end canary through OTLP/HTTP and confirm it lands in ES (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="Skip the post-apply verification canary.",
+    )
+    parser.add_argument(
+        "--verify-endpoint",
+        default="",
+        help="Override the OTLP/HTTP endpoint used for verification. Defaults to the generated bridge endpoint.",
+    )
     parser.add_argument("--no-verify-tls", action="store_true", help="Disable TLS certificate verification for ES and Kibana requests")
     parser.add_argument("--kibana-api-key", default="", help="Optional Kibana API key (instead of reusing ES Basic Auth)")
     parser.add_argument("--dry-run", action="store_true", help="Render assets and output the ES/Kibana apply plan without sending requests")
@@ -494,6 +513,34 @@ def main() -> int:
                 else:
                     print(f"   ⚠️  sanity check failed: {sanity_result.get('reason', 'unknown')}")
 
+        verify_result: dict[str, Any] | None = None
+        verify_path: Path | None = None
+        if args.verify and args.apply_es_assets and not args.dry_run:
+            default_verify_endpoint = f"http://{bridge_bind_host}:{bridge_http_port}"
+            verify_endpoint = args.verify_endpoint.strip() or default_verify_endpoint
+            collector_log_path = output_dir / "runtime" / "collector.log"
+            verify_args = argparse.Namespace(
+                es_url=args.es_url,
+                es_user=credentials[0] if credentials else "",
+                es_password=credentials[1] if credentials else "",
+                index_prefix=index_prefix,
+                otlp_http_endpoint=verify_endpoint,
+                service_name=args.service_name,
+                poll_attempts=5,
+                poll_backoff=1.5,
+                no_verify_tls=args.no_verify_tls,
+                collector_log=str(collector_log_path) if collector_log_path.exists() else "",
+                output=None,
+            )
+            try:
+                verify_result = run_verify_pipeline(verify_args)
+                verify_path = output_dir / "verify.json"
+                write_json(verify_path, verify_result)
+                print()
+                print(render_verify_text(verify_result))
+            except Exception as exc:  # noqa: BLE001
+                print(f"   ⚠️  verify step crashed: {exc}")
+
         report_output_arg = args.report_output
         if not report_output_arg and args.apply_es_assets and not args.dry_run:
             report_output_arg = str(output_dir / "report.md")
@@ -567,6 +614,16 @@ def main() -> int:
             )
         if native_assets_paths:
             notes.append("Use the `elastic-native` bundle when the operator prefers Fleet enrollment or APM/OTLP hybrid wiring, and when Kibana APM / Traces / Service Map / User Experience / profiling surfaces should stay native instead of being reimplemented as custom dashboards.")
+        if verify_result is not None:
+            verdict = verify_result.get("verdict", "unknown")
+            if verdict == "ok":
+                notes.append(
+                    f"End-to-end verify passed ({verify_result.get('canary_id')}): the OTLP -> ES path is live. Dashboards and alerts will see real traffic as soon as the agent emits spans."
+                )
+            else:
+                notes.append(
+                    f"End-to-end verify returned `{verdict}`. See `verify.json` for the canary details and the actionable next step; do not declare the pipeline production-ready until this comes back `ok`."
+                )
         notes.append(
             f"Use `alert_and_diagnose.py --es-url {args.es_url} --index-prefix {index_prefix} --time-range now-15m` to run alert checks with root-cause analysis. "
             "Add `--write-to-es` to persist alert history, `--generate-crontab` for scheduling, or `--webhook-url` for push notifications."
@@ -612,6 +669,8 @@ def main() -> int:
             print(f"   apply summary: {apply_summary_path}")
         if sanity_check_path:
             print(f"   sanity check: {sanity_check_path}")
+        if verify_path:
+            print(f"   verify: {verify_path}")
         if report_output_path:
             print(f"   smoke report: {report_output_path}")
         print(f"   summary: {summary_path}")

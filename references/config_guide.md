@@ -100,6 +100,26 @@ For the generated bundle in this repo:
 
 That means the first file to inspect is `otel-collector.generated.yaml`, specifically the `exporters.elasticsearch/*` blocks.
 
+## Verify Rule
+
+Every apply run should be followed by `verify_pipeline.py`. `bootstrap_observability.py` does this automatically when `--apply-es-assets` is on unless `--no-verify` is passed.
+
+What it does:
+
+1. Sends one OTLP/HTTP JSON log carrying a unique `gen_ai.agent.verify_id` to the configured endpoint (bridge by default, Collector HTTP receiver if overridden).
+2. Polls `<prefix>-events*` for that id with a short exponential backoff.
+3. Emits a verdict: `ok` / `contract_broken` / `sent_but_lost` / `transport_unreachable` / `transport_rejected`, each with a concrete `next_step`.
+
+Exit codes:
+
+- `0` `ok`
+- `2` pipeline partially alive (`contract_broken` or `sent_but_lost`)
+- `1` transport never completed
+
+Recommended default target is the OTLP HTTP bridge at `http://127.0.0.1:14319`. It's a narrower, more reliable path for the first install. Move to the native Collector ES exporter once the bridge path is stable; verify again when you do.
+
+Do not declare a pipeline "production-ready" until verify returns `ok`. `verify.json` is the durable record of that verdict.
+
 ## Elastic-native Surface Rule
 
 When bootstrap renders the `elastic-native/` bundle, treat it as the operator-facing starter for Kibana APM / Traces / User Experience / profiling surfaces:

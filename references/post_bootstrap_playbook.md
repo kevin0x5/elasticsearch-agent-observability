@@ -6,6 +6,27 @@ Bootstrap is over; something (you, an AI agent, or CI) just ran `bootstrap_obser
 
 This playbook tells an agent (human or AI) which TODO to do next, in what order.
 
+## Level 0 — Confirm the pipeline actually ingests (do this first)
+
+Before filling any panel, confirm data really reaches Elasticsearch. This is where most "Collector is up but ES is empty" failures hide.
+
+Bootstrap now runs this automatically when `--apply-es-assets` is on; the result is written to `verify.json` next to the other artifacts. If you skipped it or need to re-run:
+
+```bash
+python scripts/verify_pipeline.py \
+  --es-url <url> --es-user <user> --es-password <pass> \
+  --index-prefix <prefix> \
+  --otlp-http-endpoint http://127.0.0.1:14319   # bridge by default, or 4318 for Collector OTLP HTTP
+```
+
+Exit code contract:
+
+- `0` canary was sent and indexed — you can move on to Level 1.
+- `2` sent but lost, or indexed with the wrong shape — read the `next_step` field in the JSON output and apply it. Most common resolution: switch `--otlp-http-endpoint` from the Collector to the bridge (`:14319`) to unblock ingestion, then fix the Collector ES exporter separately.
+- `1` could not send or could not reach ES at all — nothing downstream will work until the transport or credentials are fixed; do not continue.
+
+Recommended first-install posture: **point the agent at the OTLP HTTP bridge first** (`http://127.0.0.1:14319`). It's a narrower, more reliable path and gets real traffic flowing through the same data stream / dashboards. Graduate to the native Collector ES exporter once the bridge path is stable.
+
 ## Level 1 — Tier 2 business fields (biggest ROI)
 
 Goal: fill the empty tool/model/session/turn panels.

@@ -118,15 +118,18 @@ Ignore generated output, docs, references, tests, and asset bundles when scannin
 - `apply_elasticsearch_assets.py`
 - `generate_report.py`
 - `validate_state.py`
+- `verify_pipeline.py` (post-apply canary + ES poll; auto-runs after `--apply-es-assets`)
 
 ## Self-Extension Rule
 
 Bootstrap is the first step, not the finish line. After assets are applied:
 
-1. Follow `references/post_bootstrap_playbook.md` in order. Each checklist item fills a specific empty Kibana panel.
-2. Only emit fields listed in `references/instrumentation_contract.md` or `references/telemetry_schema.md`. Unknown fields do not feed any panel or alert.
-3. If bootstrap left ES credentials in the YAML (for example when an agent took a shortcut to finish end-to-end), rotate and switch to env / API key per `references/credentials_playbook.md` before declaring the setup "production".
-4. When adding a new field that needs a new panel or alert, update all four touchpoints in one PR: `instrumentation_contract.md`, `telemetry_schema.md`, `render_es_assets.py`, `alert_and_diagnose.py`.
+1. Trust `verify_pipeline.py` as the source of truth for "the pipeline works". It runs automatically after `--apply-es-assets`; read its `verdict` in `verify.json`. If it is not `ok`, follow the `next_step` it prints — do not move on to instrumentation work until the canary lands.
+2. First-install default: point the agent at the OTLP HTTP bridge (`http://127.0.0.1:14319`). It's the narrower, more reliable path. Graduate to the native Collector ES exporter once the bridge path is stable; re-run verify when you do.
+3. Follow `references/post_bootstrap_playbook.md` in order. Level 0 is verify; each Level 1 item then fills a specific empty Kibana panel.
+4. Only emit fields listed in `references/instrumentation_contract.md` or `references/telemetry_schema.md`. Unknown fields do not feed any panel or alert.
+5. If bootstrap left ES credentials in the YAML (for example when an agent took a shortcut to finish end-to-end), rotate and switch to env / API key per `references/credentials_playbook.md` before declaring the setup "production".
+6. When adding a new field that needs a new panel or alert, update all four touchpoints in one PR: `instrumentation_contract.md`, `telemetry_schema.md`, `render_es_assets.py`, `alert_and_diagnose.py`.
 
 ## References
 

@@ -282,6 +282,8 @@ This still stays honest: the repo generates the starter assets and operating con
 
 Bootstrap delivers Tier 1 observability (latency, error rate, token totals) out of the box. Tool-level, session-level, and per-turn panels stay empty until the agent emits the corresponding `gen_ai.*` fields — that's by design, so empty panels serve as TODO markers.
 
+`bootstrap_observability.py` ends with an automatic end-to-end verify (a canary OTLP log + ES poll, written to `verify.json`). If it does not return `ok`, follow its `next_step` before anything else — the most common fix on a first install is to point the agent at the OTLP HTTP bridge (`http://127.0.0.1:14319`) instead of the native Collector ES exporter.
+
 Three short docs cover the self-extension path, in recommended reading order:
 
 1. [`references/instrumentation_contract.md`](references/instrumentation_contract.md) — the three tiers of fields and what each one unlocks.

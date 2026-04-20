@@ -28,6 +28,7 @@ from render_collector_config import render_config
 from render_elastic_agent_assets import SUPPORTED_INGEST_MODES, render_assets as render_elastic_native_assets
 from render_es_assets import render_assets
 from render_instrument_snippet import render_snippet_to_file
+from render_llm_proxy_starter import render_llm_proxy_bundle
 from render_otlp_http_bridge import render_bridge_script
 
 DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:4317"
@@ -75,6 +76,12 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Target runtime for the generated instrumentation starter. 'auto' picks Node for TS/JS workspaces.",
     )
+    parser.add_argument(
+        "--generate-llm-proxy",
+        action="store_true",
+        help="Generate an llm-proxy/ docker-compose bundle (LiteLLM) for zero-code observability of upstream agents (e.g. OpenClaw).",
+    )
+    parser.add_argument("--llm-proxy-port", type=int, default=4000, help="Host port the LLM proxy listens on")
     parser.add_argument("--no-verify-tls", action="store_true", help="Disable TLS certificate verification for ES and Kibana requests")
     parser.add_argument("--kibana-api-key", default="", help="Optional Kibana API key (instead of reusing ES Basic Auth)")
     parser.add_argument("--dry-run", action="store_true", help="Render assets and output the ES/Kibana apply plan without sending requests")
@@ -233,6 +240,7 @@ def build_summary(
     apply_summary_path: Path | None,
     sanity_check_path: Path | None,
     report_output: Path | None,
+    llm_proxy_paths: dict[str, str] | None = None,
 ) -> str:
     lines = [
         "# Agent Observability Bootstrap Summary",
@@ -284,6 +292,14 @@ def build_summary(
         lines.append(f"- sanity check: `{sanity_check_path}`")
     if report_output:
         lines.append(f"- smoke report: `{report_output}`")
+    if llm_proxy_paths:
+        proxy_labels = [
+            ("compose", "llm-proxy docker-compose"),
+            ("config", "llm-proxy config"),
+            ("env_example", "llm-proxy env template"),
+            ("readme", "llm-proxy readme"),
+        ]
+        lines.extend(f"- {label}: `{llm_proxy_paths[key]}`" for key, label in proxy_labels if key in llm_proxy_paths)
     if notes:
         lines.extend(["", "## Notes", ""])
         lines.extend(f"- {note}" for note in notes)
@@ -434,6 +450,17 @@ def main() -> int:
             else:
                 instrument_snippet_path = snippet_result
 
+        llm_proxy_paths: dict[str, str] | None = None
+        if args.generate_llm_proxy:
+            proxy_dir = output_dir / "llm-proxy"
+            proxy_bundle = render_llm_proxy_bundle(
+                proxy_dir,
+                service_name=args.service_name,
+                environment=args.environment,
+                proxy_port=args.llm_proxy_port,
+            )
+            llm_proxy_paths = {key: str(path) for key, path in proxy_bundle.items()}
+
         apply_summary_path = None
         sanity_check_path = None
         apply_summary: dict[str, Any] | None = None
@@ -534,6 +561,10 @@ def main() -> int:
             notes.append("Use `run-otlphttpbridge.sh` plus `agent-otel-bridge.env` when you need a logs/traces-only fallback that bypasses the Collector Elasticsearch exporter.")
         if instrument_snippet_path:
             notes.append("`agent_otel_bootstrap.py` is a starter snippet for Python runtimes; you still need to import or wire it into the actual agent entrypoint.")
+        if llm_proxy_paths:
+            notes.append(
+                f"The `llm-proxy/` bundle provides a zero-code path for upstream OSS agents: run `docker compose up -d` in that directory and point the agent at `http://localhost:{args.llm_proxy_port}/v1`. See `llm-proxy/README.md`."
+            )
         if native_assets_paths:
             notes.append("Use the `elastic-native` bundle when the operator prefers Fleet enrollment or APM/OTLP hybrid wiring, and when Kibana APM / Traces / Service Map / User Experience / profiling surfaces should stay native instead of being reimplemented as custom dashboards.")
         notes.append(
@@ -560,6 +591,7 @@ def main() -> int:
                 apply_summary_path=apply_summary_path,
                 sanity_check_path=sanity_check_path,
                 report_output=report_output_path,
+                llm_proxy_paths=llm_proxy_paths,
             ),
         )
 

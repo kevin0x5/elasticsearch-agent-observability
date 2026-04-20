@@ -31,6 +31,8 @@ It turns a workspace into a ready observability starter for Elasticsearch and Ki
 - **Elasticsearch assets**: data streams, component templates (with component-type / guardrail / evaluation / memory fields), index templates, ingest pipelines, and lifecycle policies
 - **Kibana assets**: data views, saved searches, Lens visualizations, and an overview dashboard
 - **Elastic-native starter bundle**: APM env + entrypoint guide, surface manifest, preflight checklist, trace-analysis playbook, browser RUM config/snippet, UX playbook, and profiling rollout checklist
+- **Instrumentation starter (Python *or* Node/TS)**: Python auto-patches OpenAI / Anthropic on import; Node/TS emits a preloadable `@opentelemetry/sdk-node` bundle with HTTP/Undici auto-instrumentation plus `tracedToolCall` / `tracedModelCall` wrappers
+- **LLM proxy starter**: Docker Compose bundle that runs LiteLLM in front of OpenAI / Anthropic — zero-code observability for upstream OSS agents you do not want to fork (e.g. `openclaw/openclaw`)
 - **Diagnosis flow**: alert checks for error-rate spikes, latency regressions, and token anomalies with RCA output
 - **Drift validation**: compare the live Elasticsearch cluster with locally generated assets
 - **Knowledge archival**: write RCA results into `elasticsearch-insight-store`
@@ -42,7 +44,7 @@ This repository is designed to be used as a skill repository.
 Clone it into your agent's skill directory:
 
 ```bash
-git clone https://github.com/kevin-codelab/elasticsearch-agent-observability.git <skill-dir>/elasticsearch-agent-observability
+git clone https://github.com/kevin0x5/elasticsearch-agent-observability.git <skill-dir>/elasticsearch-agent-observability
 ```
 
 The repo uses the `SKILL.md + scripts + references` shape so an agent runtime can call a shared observability workflow.
@@ -87,6 +89,34 @@ python scripts/bootstrap_observability.py \
   --apply-es-assets \
   --apply-kibana-assets
 ```
+
+### Bootstrap with Node.js / TypeScript instrumentation starter
+
+```bash
+python scripts/bootstrap_observability.py \
+  --workspace <ts-agent-workspace> \
+  --es-url <elasticsearch-url> \
+  --generate-instrument-snippet \
+  --instrument-runtime node
+```
+
+Produces `node-instrumentation/agent-otel-bootstrap.mjs` (preload with
+`node --import ./agent-otel-bootstrap.mjs`) and a README that documents
+the `tracedToolCall` / `tracedModelCall` wrappers.
+
+### Zero-code path for upstream OSS agents (LLM proxy)
+
+```bash
+python scripts/bootstrap_observability.py \
+  --workspace <agent-workspace> \
+  --es-url <elasticsearch-url> \
+  --generate-llm-proxy
+```
+
+Produces `llm-proxy/docker-compose.yaml` and config for a LiteLLM proxy
+that emits OTel spans with the same `gen_ai.*` attributes the generated
+dashboards already consume. Point the agent at `http://localhost:4000/v1`
+and no source changes are needed.
 
 ### Diagnose recent issues
 

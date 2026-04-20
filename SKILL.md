@@ -60,7 +60,8 @@ Current repo capabilities are best described as:
 - Elastic-native starter assets for APM traces, Kibana native app entrypoints, trace-analysis playbooks, browser RUM, UX rollout, and profiling notes
 - standalone alert + root-cause analysis script (no Kibana Alerting license needed)
 - alert → insight-store bridge for automatic RCA conclusion archival
-- auto-instrumentation starter snippet for Python agents (Go / Java / TypeScript agents should wire OTel SDK directly)
+- auto-instrumentation starter snippet for Python agents (monkey-patches OpenAI / Anthropic on import), plus a Node.js / TypeScript preloadable bundle (`@opentelemetry/sdk-node` + HTTP/Undici + `tracedToolCall` / `tracedModelCall` wrappers) for TS-first runtimes such as `openclaw/openclaw`
+- LLM proxy starter bundle (LiteLLM docker-compose) for zero-code observability of upstream OSS agents you do not want to fork; the proxy emits the same `gen_ai.*` span attributes that the rest of this pipeline already understands
 - dry-run planning before touching a live ES / Kibana target
 - configuration drift detection between local assets and live cluster
 - observability maturity scoring with upgrade guidance
@@ -111,7 +112,8 @@ Ignore generated output, docs, references, tests, and asset bundles when scannin
 - `render_collector_config.py`
 - `render_es_assets.py`
 - `render_elastic_agent_assets.py`
-- `render_instrument_snippet.py`
+- `render_instrument_snippet.py` (Python or Node/TS via `--runtime`)
+- `render_llm_proxy_starter.py` (zero-code path for upstream OSS agents)
 - `alert_and_diagnose.py`
 - `apply_elasticsearch_assets.py`
 - `generate_report.py`

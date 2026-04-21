@@ -340,13 +340,86 @@ def write_report(*, es_config: ESConfig, report_config_path: Path, output: Path,
     return resolved_output
 
 
+def _preflight(args: argparse.Namespace, workspace: Path, credentials: tuple[str, str] | None) -> list[str]:
+    """Fail-fast checks before any file is written.
+
+    Catches the failure modes users see most often:
+
+    - apply-* requested but the target cluster cannot be reached
+    - ingest mode requires inputs the user did not provide
+    - --workspace points at an empty directory (almost certainly a typo)
+
+    Returns a list of non-fatal warnings to surface in the summary; raises
+    SkillError on hard failures so nothing lands on disk.
+    """
+    warnings: list[str] = []
+
+    # 1) Cluster reachability — only when the user asked us to write to it.
+    if not args.dry_run and (args.apply_es_assets or args.apply_kibana_assets):
+        es_config = ESConfig(
+            es_url=args.es_url,
+            es_user=credentials[0] if credentials else None,
+            es_password=credentials[1] if credentials else None,
+            verify_tls=not args.no_verify_tls,
+            timeout_seconds=5,
+            max_retries=0,
+        )
+        try:
+            es_request(es_config, "GET", "/")
+        except SkillError as exc:
+            raise SkillError(
+                f"Preflight: Elasticsearch at `{args.es_url}` is not reachable ({exc}). "
+                "Fix the URL/credentials before retrying — no files have been written."
+            ) from exc
+
+        if args.apply_kibana_assets:
+            kibana_url = args.kibana_url.strip()
+            if not kibana_url:
+                raise SkillError(
+                    "Preflight: --apply-kibana-assets requires --kibana-url. No files have been written."
+                )
+            # Cheap reachability ping; the saved-objects API needs kbn-xsrf, so we
+            # just hit the unauthenticated /api/status endpoint.
+            try:
+                from apply_elasticsearch_assets import kibana_request
+                kibana_request(es_config, kibana_url, "GET", "/api/status")
+            except SkillError as exc:
+                raise SkillError(
+                    f"Preflight: Kibana at `{kibana_url}` is not reachable ({exc}). "
+                    "Fix the URL/credentials before retrying — no files have been written."
+                ) from exc
+
+    # 2) Ingest-mode required inputs.
+    if args.ingest_mode == "elastic-agent-fleet":
+        missing = []
+        if not args.fleet_server_url.strip():
+            missing.append("--fleet-server-url")
+        if not args.fleet_enrollment_token.strip():
+            missing.append("--fleet-enrollment-token")
+        if missing:
+            warnings.append(
+                f"ingest-mode `elastic-agent-fleet` was selected but {', '.join(missing)} is empty; "
+                "the generated elastic-agent policy will not be enrollable until you fill these in."
+            )
+
+    # 3) Empty / non-project workspace heuristic.
+    visible = [p for p in workspace.iterdir() if not p.name.startswith(".")]
+    if not visible:
+        warnings.append(
+            f"--workspace `{workspace}` is empty; discovery will return nothing and the dashboard will stay blank. "
+            "Did you mean a different path?"
+        )
+
+    return warnings
+
+
 def main() -> int:
     try:
         args = parse_args()
         if args.apply_kibana_assets and not args.kibana_url.strip() and not args.dry_run:
             raise SkillError("--kibana-url is required when --apply-kibana-assets is enabled unless --dry-run is used")
         workspace = validate_workspace_dir(Path(args.workspace), "Workspace")
-        output_dir = ensure_dir(Path(args.output_dir).expanduser().resolve())
+        output_dir_path = Path(args.output_dir).expanduser().resolve()
         index_prefix = validate_index_prefix(args.index_prefix)
         retention_days = validate_positive_int(args.retention_days, "Retention days")
         max_files = validate_positive_int(args.max_files, "Max files")
@@ -356,6 +429,13 @@ def main() -> int:
         auth_mode = "none"
         if credentials:
             auth_mode = "inline" if args.embed_es_credentials else "env"
+
+        # Preflight: catch reachability + config errors before writing anything.
+        preflight_warnings = _preflight(args, workspace, credentials)
+
+        # Only create the output dir after preflight passes — keeps the disk
+        # clean when the user mistyped --es-url and nothing should be written.
+        output_dir = ensure_dir(output_dir_path)
 
         discovery = discover_workspace(workspace, max_files=max_files)
         discovery_path = output_dir / "discovery.json"
@@ -566,6 +646,9 @@ def main() -> int:
             has_elastic_native_bundle=bool(native_assets_paths),
             dry_run=args.dry_run,
         )
+        # Preflight warnings are the most important notes — surface them first.
+        for warning in reversed(preflight_warnings):
+            notes.insert(0, f"PREFLIGHT WARNING: {warning}")
         if apply_summary_path:
             if args.dry_run:
                 plan_count = apply_summary.get("plan_count", 0) if isinstance(apply_summary, dict) else 0

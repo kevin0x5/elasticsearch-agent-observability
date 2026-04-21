@@ -36,6 +36,7 @@ from common import (
     ESConfig,
     SkillError,
     build_data_stream_name,
+    emit_skill_audit,
     es_request,
     print_error,
     validate_credential_pair,
@@ -77,6 +78,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--insight-es-url", default="", help="ES URL for insight-store (defaults to --es-url)")
     parser.add_argument("--insight-es-user", default="", help="ES user for insight-store (defaults to --es-user)")
     parser.add_argument("--insight-es-password", default="", help="ES password for insight-store (defaults to --es-password)")
+    parser.add_argument(
+        "--audit",
+        dest="audit",
+        action="store_true",
+        default=True,
+        help="Write a self-audit record to the events data stream (default: enabled). Useful when an agent claims it ran this skill.",
+    )
+    parser.add_argument("--no-audit", dest="audit", action="store_false", help="Skip the self-audit write.")
     return parser.parse_args()
 
 
@@ -401,6 +410,177 @@ def _analyze_long_turn_hotspot(current: dict[str, Any], threshold_ms: float) -> 
     }
 
 
+def _extract_keys(alert: dict[str, Any]) -> dict[str, set[str]]:
+    """Pull the entities that tie alerts together (sessions, tools, models, components).
+
+    We look inside the ``evidence`` block because that is where each analyzer
+    already surfaces the top contributors. Everything is lower-cased and
+    de-duplicated so correlation is robust to surface-level variation.
+    """
+    ev = alert.get("evidence", {}) or {}
+    keys: dict[str, set[str]] = {"session": set(), "tool": set(), "model": set(), "component": set(), "turn": set()}
+
+    def _add(bucket: str, items: Any) -> None:
+        for entry in items or []:
+            if isinstance(entry, dict):
+                value = entry.get("key")
+            else:
+                value = entry
+            text = str(value or "").strip()
+            if text and text != "unknown":
+                keys[bucket].add(text)
+
+    _add("session", ev.get("top_failure_sessions"))
+    _add("session", ev.get("top_retry_sessions"))
+    _add("tool", ev.get("top_error_tools"))
+    _add("tool", ev.get("top_latency_tools"))
+    _add("tool", ev.get("top_tools"))
+    _add("tool", ev.get("top_retry_tools"))
+    _add("model", ev.get("top_error_models"))
+    _add("model", ev.get("top_models"))
+    _add("component", ev.get("top_failure_components"))
+    for turn in ev.get("top_turns") or []:
+        if isinstance(turn, dict):
+            if turn.get("key"):
+                keys["turn"].add(str(turn["key"]))
+            if turn.get("session_id"):
+                keys["session"].add(str(turn["session_id"]))
+            if turn.get("component_type"):
+                keys["component"].add(str(turn["component_type"]))
+    slowest = ev.get("slowest_turn") or {}
+    if isinstance(slowest, dict):
+        if slowest.get("session_id"):
+            keys["session"].add(str(slowest["session_id"]))
+        if slowest.get("component_type"):
+            keys["component"].add(str(slowest["component_type"]))
+    return keys
+
+
+def _confidence(alert: dict[str, Any]) -> float:
+    """Cheap, evidence-based confidence in [0, 1].
+
+    Avoids black-box ML: the score rises with (a) how far the metric deviates
+    from baseline and (b) how many distinct evidence signals the analyzer found.
+    A score of 1.0 means "multiple strong signals all agree"; 0.3 means
+    "threshold tripped but weak evidence". This is meant to rank, not to be
+    absolute.
+    """
+    ev = alert.get("evidence", {}) or {}
+    score = 0.3  # having tripped a threshold is worth a baseline.
+
+    # 1. Baseline deviation — each analyzer records one of these.
+    error_rate = ev.get("error_rate")
+    baseline_rate = ev.get("baseline_rate")
+    if isinstance(error_rate, (int, float)) and isinstance(baseline_rate, (int, float)) and baseline_rate > 0:
+        delta = (error_rate - baseline_rate) / baseline_rate
+        score += min(0.35, max(0.0, delta / 5.0))  # 5x baseline -> +0.35
+    ratio = ev.get("ratio") or ev.get("baseline_multiplier")
+    if isinstance(ratio, (int, float)) and ratio > 1:
+        score += min(0.3, (ratio - 1) / 10.0)  # 10x -> +0.3
+    p95 = ev.get("p95_ms")
+    threshold = ev.get("threshold_ms")
+    if isinstance(p95, (int, float)) and isinstance(threshold, (int, float)) and threshold > 0:
+        score += min(0.3, max(0.0, (p95 - threshold) / (threshold * 3)))
+    concentration = ev.get("concentration")
+    if isinstance(concentration, (int, float)):
+        score += min(0.3, concentration * 0.5)  # 60% concentration -> +0.3
+
+    # 2. Signal breadth — multiple non-empty top-N lists mean the story is
+    #    consistent across dimensions (same tool appears in errors AND latency etc.).
+    signal_lists = [
+        "top_error_tools", "top_error_models", "top_latency_tools", "top_tools",
+        "top_models", "top_failure_sessions", "top_retry_sessions",
+        "top_turns", "top_failure_components",
+    ]
+    non_empty = sum(1 for name in signal_lists if ev.get(name))
+    score += min(0.15, non_empty * 0.03)
+
+    return round(min(1.0, score), 2)
+
+
+def _correlate_alerts(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group alerts that share entities into causal chains.
+
+    Two alerts are chained when they share at least one session, tool, model,
+    component or turn id. Transitive closure via union-find so a chain like
+    ``retry_storm -> token_anomaly -> latency_degradation`` collapses into one
+    story even if no single pair overlaps on all dimensions.
+
+    Each chain gets a lay narrative (phenomenon -> consequence) ordered by
+    analyzer severity (critical before warning) and a combined confidence
+    equal to ``max(member_confidence)`` — chains do not invent certainty they
+    don't have.
+    """
+    if len(alerts) < 2:
+        return []
+
+    key_sets = [_extract_keys(a) for a in alerts]
+    parent = list(range(len(alerts)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(len(alerts)):
+        for j in range(i + 1, len(alerts)):
+            overlap = False
+            for bucket in ("session", "tool", "model", "component", "turn"):
+                if key_sets[i][bucket] & key_sets[j][bucket]:
+                    overlap = True
+                    break
+            if overlap:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for idx in range(len(alerts)):
+        groups.setdefault(find(idx), []).append(idx)
+
+    severity_order = {"critical": 0, "warning": 1, "info": 2}
+    chains: list[dict[str, Any]] = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        ordered = sorted(members, key=lambda k: severity_order.get(alerts[k].get("severity", "info"), 99))
+        narrative_parts = [alerts[k]["alert_type"] for k in ordered]
+        shared: dict[str, list[str]] = {}
+        for bucket in ("session", "tool", "model", "component", "turn"):
+            common = set.intersection(*(key_sets[k][bucket] for k in members))
+            if common:
+                shared[bucket] = sorted(common)
+        confidence = max(alerts[k].get("confidence", 0.0) for k in members)
+        chains.append(
+            {
+                "members": [alerts[k]["alert_type"] for k in ordered],
+                "narrative": " -> ".join(narrative_parts),
+                "shared_entities": shared,
+                "confidence": confidence,
+                "summary": _chain_summary(ordered, alerts, shared),
+            }
+        )
+    # Strongest chain first.
+    chains.sort(key=lambda c: c["confidence"], reverse=True)
+    return chains
+
+
+def _chain_summary(ordered_idx: list[int], alerts: list[dict[str, Any]], shared: dict[str, list[str]]) -> str:
+    parts: list[str] = []
+    shared_desc = ", ".join(f"{bucket}=`{values[0]}`" for bucket, values in shared.items() if values)
+    if shared_desc:
+        parts.append(f"Shared {shared_desc}.")
+    chain_text = " -> ".join(alerts[i]["alert_type"] for i in ordered_idx)
+    parts.append(f"Alert chain (severity-ordered): {chain_text}.")
+    head = alerts[ordered_idx[0]]
+    parts.append(f"Lead: {head.get('phenomenon', '')}")
+    return " ".join(parts)
+
+
 def run_alert_check(
     config: ESConfig,
     *,
@@ -424,7 +604,9 @@ def run_alert_check(
         _analyze_long_turn_hotspot(current, p95_latency_threshold_ms),
     ]:
         if alert:
+            alert["confidence"] = _confidence(alert)
             alerts.append(alert)
+    chains = _correlate_alerts(alerts)
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "index_prefix": index_prefix,
@@ -433,6 +615,10 @@ def run_alert_check(
         "alert_count": len(alerts),
         "status": "alert" if alerts else "ok",
         "alerts": alerts,
+        "correlation": {
+            "chain_count": len(chains),
+            "chains": chains,
+        },
     }
 
 
@@ -614,15 +800,24 @@ def render_text(result: dict[str, Any]) -> str:
         return f"✅ [{result['checked_at']}] No alerts triggered. ({result['time_range']})"
     lines = [f"🚨 [{result['checked_at']}] {result['alert_count']} alert(s) triggered ({result['time_range']})", ""]
     for alert in result["alerts"]:
+        conf = alert.get("confidence")
+        conf_text = f" conf={conf}" if conf is not None else ""
         lines.extend(
             [
-                f"--- [{alert['severity'].upper()}] {alert['alert_type']} ---",
+                f"--- [{alert['severity'].upper()}]{conf_text} {alert['alert_type']} ---",
                 f"Phenomenon: {alert['phenomenon']}",
                 f"Root cause:  {alert['root_cause']}",
                 f"Recommendation: {alert['recommendation']}",
                 "",
             ]
         )
+    chains = (result.get("correlation") or {}).get("chains") or []
+    if chains:
+        lines.append("=== Correlated chains ===")
+        for idx, chain in enumerate(chains, 1):
+            lines.append(f"[{idx}] conf={chain['confidence']}  {chain['narrative']}")
+            lines.append(f"    {chain['summary']}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -631,9 +826,11 @@ def render_markdown(result: dict[str, Any]) -> str:
         return f"# ✅ No alerts\n\nChecked at `{result['checked_at']}` for window `{result['time_range']}`.\n"
     lines = [f"# 🚨 {result['alert_count']} Alert(s)", "", f"- checked_at: `{result['checked_at']}`", f"- window: `{result['time_range']}`", ""]
     for alert in result["alerts"]:
+        conf = alert.get("confidence")
+        conf_text = f" · confidence `{conf}`" if conf is not None else ""
         lines.extend(
             [
-                f"## [{alert['severity'].upper()}] {alert['alert_type']}",
+                f"## [{alert['severity'].upper()}] {alert['alert_type']}{conf_text}",
                 "",
                 f"**Phenomenon**: {alert['phenomenon']}",
                 "",
@@ -643,6 +840,13 @@ def render_markdown(result: dict[str, Any]) -> str:
                 "",
             ]
         )
+    chains = (result.get("correlation") or {}).get("chains") or []
+    if chains:
+        lines.extend(["## Correlated chains", ""])
+        for chain in chains:
+            lines.append(f"- **{chain['narrative']}** (confidence `{chain['confidence']}`)")
+            lines.append(f"  - {chain['summary']}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -655,6 +859,8 @@ def main() -> int:
             es_user=credentials[0] if credentials else None,
             es_password=credentials[1] if credentials else None,
         )
+        import time as _time
+        start = _time.monotonic()
         result = run_alert_check(
             config,
             index_prefix=validate_index_prefix(args.index_prefix),
@@ -664,6 +870,7 @@ def main() -> int:
             p95_latency_threshold_ms=args.p95_latency_threshold_ms,
             token_threshold_multiplier=args.token_threshold_multiplier,
         )
+        duration_ms = int((_time.monotonic() - start) * 1000)
         if args.output:
             output_path = Path(args.output).expanduser().resolve()
             if args.output_format == "json":
@@ -689,6 +896,29 @@ def main() -> int:
             )
         if args.generate_crontab:
             _print_crontab(args)
+        if args.audit:
+            chains = (result.get("correlation") or {}).get("chains") or []
+            emit_skill_audit(
+                config,
+                index_prefix=args.index_prefix,
+                tool_name="alert_and_diagnose",
+                verdict=result["status"],
+                duration_ms=duration_ms,
+                inputs={
+                    "time_range": args.time_range,
+                    "baseline_range": args.baseline_range,
+                    "error_threshold": args.error_threshold,
+                    "p95_latency_threshold_ms": args.p95_latency_threshold_ms,
+                    "token_threshold_multiplier": args.token_threshold_multiplier,
+                },
+                evidence={
+                    "alert_count": result.get("alert_count", 0),
+                    "alert_types": [a.get("alert_type") for a in result.get("alerts", [])],
+                    "chain_count": len(chains),
+                    "chain_narratives": [c.get("narrative") for c in chains],
+                    "top_confidence": max((a.get("confidence", 0.0) for a in result.get("alerts", [])), default=0.0),
+                },
+            )
         return 0 if result["status"] == "ok" else 2
     except SkillError as exc:
         print_error(str(exc))

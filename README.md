@@ -1,6 +1,9 @@
 # elasticsearch-agent-observability
 
 Bootstrap observability for AI agents on Elasticsearch + OpenTelemetry + Kibana.
+
+**Three signals, one data stream.** Traces, logs, and metrics all land in the same `<prefix>-events` data stream with a shared ECS schema, so correlation across signals is a KQL filter, not a join. The rendered Collector config wires OTLP → spanmetrics → Elasticsearch exporters for all three; the Kibana dashboard ships with latency P50/P95 lines, token-usage area chart, and event-rate breakdown side by side with Discover drilldown.
+
 One command renders the Collector config, Elasticsearch index/pipeline/ILM assets, Kibana dashboards, an end-to-end verification canary, and (optionally) a Node/TS instrumentation starter or a zero-code LLM proxy bundle.
 
 ## Quick start
@@ -37,6 +40,8 @@ Concretely, the questions it lets you answer:
 - Where is my token budget going, and when did it spike?
 - Which tools and models are slow, error-prone, or both?
 - Why was last Tuesday slow — down to the session, the turn, and a generated root cause?
+- When multiple alerts fire in the same window, are they the same incident? (`alert_and_diagnose` now emits `correlation.chains` — alerts sharing a session/tool/model/component are merged into a single chain with a confidence score.)
+- Did the agent actually run the diagnostic, or claim it did? (every `doctor` / `alert_and_diagnose` run writes a `internal.skill_audit` record with verdict + evidence keys, so the skill is observable about itself.)
 - Did anyone change my cluster config since the last deploy?
 - Is the pipeline live right now, or am I looking at stale data?
 - How do I keep an incident's findings around after the fix ships?

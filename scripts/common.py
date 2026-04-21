@@ -253,6 +253,67 @@ TESTED_MAX_MAJOR = 9
 # can tell ours apart from a foreign resource that happens to share the name.
 OBSERVER_PRODUCT_TAG = "elasticsearch-agent-observability"
 
+# Dataset tag used by skill self-audit events. Shares the `internal.*`
+# namespace with sanity_check / pipeline_verify / alert_check so alerting
+# and report aggregations already filter it out.
+SKILL_AUDIT_DATASET = "internal.skill_audit"
+
+
+def emit_skill_audit(
+    config: "ESConfig",
+    *,
+    index_prefix: str,
+    tool_name: str,
+    verdict: str,
+    duration_ms: int | float | None = None,
+    inputs: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> bool:
+    """Write one skill-self-audit record to ``<prefix>-events``.
+
+    Why this exists: when an agent claims "I ran doctor and it was fine", we
+    want a trace we can look up. The audit record captures tool_name,
+    verdict, duration, inputs (URLs/prefix, no secrets), and a small
+    evidence dict (e.g. check names with their statuses). Written via
+    ``_create`` so data-stream rules are satisfied. Best-effort: failures
+    are swallowed with a stderr warning so audit never masks the real
+    result of the caller.
+
+    Audit records carry ``event.dataset = internal.skill_audit`` so the
+    same ``must_not`` filter that already keeps sanity_check out of alert
+    statistics keeps these out too.
+    """
+    ds_name = build_data_stream_name(index_prefix)
+    doc: dict[str, Any] = {
+        "@timestamp": utcnow_iso(),
+        "event.kind": "event",
+        "event.category": "process",
+        "event.action": "skill_run",
+        "event.outcome": "success" if verdict in {"ok", "healthy", "ready", "passed"} else "failure",
+        "event.dataset": SKILL_AUDIT_DATASET,
+        "service.name": "elasticsearch-agent-observability",
+        "observer.product": OBSERVER_PRODUCT_TAG,
+        "gen_ai.agent.signal_type": "skill_audit",
+        "gen_ai.agent.tool_name": tool_name,
+        "skill.verdict": verdict,
+    }
+    if duration_ms is not None:
+        doc["skill.duration_ms"] = duration_ms
+    if inputs:
+        doc["skill.inputs"] = inputs
+    if evidence:
+        doc["skill.evidence"] = evidence
+    if extra:
+        for key, value in extra.items():
+            doc.setdefault(key, value)
+    try:
+        es_request(config, "POST", f"/{ds_name}/_create", doc)
+        return True
+    except SkillError as exc:
+        print(f"⚠️  skill self-audit write failed ({tool_name}): {exc}", file=sys.stderr)
+        return False
+
 
 def parse_es_version(version_string: str) -> tuple[int, int, int]:
     """Parse an Elasticsearch version string like ``8.13.2`` into a tuple.

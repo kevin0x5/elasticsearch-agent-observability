@@ -55,6 +55,7 @@ from common import (
     SkillError,
     build_data_stream_name,
     build_ssl_context,
+    emit_skill_audit,
     es_request,
     print_error,
     validate_credential_pair,
@@ -96,6 +97,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-verify-tls", action="store_true")
     parser.add_argument("--collector-log", default="", help="Optional Collector log path for tail-on-failure")
     parser.add_argument("--output-format", choices=["text", "json"], default="text")
+    parser.add_argument(
+        "--audit",
+        dest="audit",
+        action="store_true",
+        default=True,
+        help="Write a self-audit record with the verdict and per-check statuses (default: enabled).",
+    )
+    parser.add_argument("--no-audit", dest="audit", action="store_false", help="Skip the self-audit write.")
     return parser.parse_args()
 
 
@@ -370,11 +379,40 @@ def render_text(result: dict[str, Any]) -> str:
 def main() -> int:
     try:
         args = parse_args()
+        import time as _time
+        start = _time.monotonic()
         result = run_doctor(args)
+        duration_ms = int((_time.monotonic() - start) * 1000)
         if args.output_format == "json":
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print(render_text(result))
+        if args.audit and result["verdict"] != "unreachable":
+            # Audit writes to ES; when ES is unreachable we already know, skip.
+            credentials = validate_credential_pair(args.es_user, args.es_password)
+            config = ESConfig(
+                es_url=args.es_url,
+                es_user=credentials[0] if credentials else None,
+                es_password=credentials[1] if credentials else None,
+                verify_tls=not args.no_verify_tls,
+            )
+            emit_skill_audit(
+                config,
+                index_prefix=validate_index_prefix(args.index_prefix),
+                tool_name="doctor",
+                verdict=result["verdict"],
+                duration_ms=duration_ms,
+                inputs={
+                    "healthz_url": args.healthz_url,
+                    "otlp_http_endpoint": args.otlp_http_endpoint,
+                    "freshness_minutes": args.freshness_minutes,
+                    "skip_canary": args.skip_canary,
+                },
+                evidence={
+                    name: check.get("status")
+                    for name, check in result.get("checks", {}).items()
+                },
+            )
         verdict = result["verdict"]
         if verdict == "healthy":
             return 0

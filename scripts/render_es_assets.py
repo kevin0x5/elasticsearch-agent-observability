@@ -150,6 +150,7 @@ def build_component_template_ecs_base(index_prefix: str) -> dict[str, Any]:
         },
         "_meta": {
             "product": "elasticsearch-agent-observability",
+            "managed": True,
             "description": "ECS-compatible base mappings for agent observability data streams",
         },
     }
@@ -168,6 +169,7 @@ def build_component_template_settings(index_prefix: str, retention_days: int) ->
         },
         "_meta": {
             "product": "elasticsearch-agent-observability",
+            "managed": True,
             "retention_days": retention_days,
         },
     }
@@ -185,6 +187,7 @@ def build_index_template(index_prefix: str, modules: list[str]) -> dict[str, Any
         ],
         "_meta": {
             "product": "elasticsearch-agent-observability",
+            "managed": True,
             "recommended_modules": modules,
         },
     }
@@ -197,6 +200,10 @@ def build_index_template(index_prefix: str, modules: list[str]) -> dict[str, Any
 def build_ingest_pipeline(modules: list[str]) -> dict[str, Any]:
     return {
         "description": "Normalize agent observability events: ECS alignment, structured parsing, GenAI field preservation, and redaction",
+        "_meta": {
+            "product": "elasticsearch-agent-observability",
+            "managed": True,
+        },
         "processors": [
             # --- ECS stamping ---
             {"set": {"field": "observer.product", "value": "elasticsearch-agent-observability"}},
@@ -252,6 +259,11 @@ def build_ilm_policy(retention_days: int) -> dict[str, Any]:
     cold_age = max(warm_age + 1, retention_days // 2)
     return {
         "policy": {
+            "_meta": {
+                "product": "elasticsearch-agent-observability",
+                "managed": True,
+                "retention_days": retention_days,
+            },
             "phases": {
                 "hot": {
                     "actions": {

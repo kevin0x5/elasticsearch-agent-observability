@@ -235,6 +235,102 @@ def print_info(message: str) -> None:
     print(f"ℹ️  {message}")
 
 
+# ---------------------------------------------------------------------------
+# ES version compatibility
+# ---------------------------------------------------------------------------
+
+# Baseline: the asset shapes we render rely on data-stream-first APIs and
+# composable index templates. Both are stable from 8.0 onwards. 7.x will
+# silently accept some calls and reject others (e.g. stricter data-stream
+# enforcement around 7.16 landed in weird shapes) — safer to refuse.
+MIN_SUPPORTED_MAJOR = 8
+# Anything major >= this is explicitly tested. Higher majors (ES 10+ when it
+# ships) will just print a warning — the assets are data-stream/ECS-based,
+# not exotic, so breakage in a future major is possible but unlikely.
+TESTED_MAX_MAJOR = 9
+
+# The product tag we stamp into _meta on every asset we render, so uninstall
+# can tell ours apart from a foreign resource that happens to share the name.
+OBSERVER_PRODUCT_TAG = "elasticsearch-agent-observability"
+
+
+def parse_es_version(version_string: str) -> tuple[int, int, int]:
+    """Parse an Elasticsearch version string like ``8.13.2`` into a tuple.
+
+    Returns ``(0, 0, 0)`` for unparseable input so callers can special-case it.
+    """
+    text = (version_string or "").strip().split("-", 1)[0].split("+", 1)[0]
+    parts = text.split(".")
+    if len(parts) < 1 or not parts[0].isdigit():
+        return (0, 0, 0)
+    major = int(parts[0])
+    minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    return (major, minor, patch)
+
+
+def check_es_version(config: "ESConfig") -> dict[str, Any]:
+    """Probe ``GET /`` and classify the ES version.
+
+    Returns a dict with ``version``, ``major/minor/patch``, ``status`` and
+    ``detail``. Status values:
+
+    - ``supported`` — major is within the tested window
+    - ``warn``      — reachable but either too new (future major) or unparseable
+    - ``unsupported`` — major is below ``MIN_SUPPORTED_MAJOR``; callers should refuse to proceed
+
+    We deliberately do NOT raise from here. Callers decide how strict to be
+    (bootstrap refuses unsupported, doctor reports warn as ``degraded``).
+    """
+    response = es_request(config, "GET", "/")
+    version_info = response.get("version") or {}
+    number = str(version_info.get("number") or "").strip()
+    major, minor, patch = parse_es_version(number)
+
+    if major == 0:
+        return {
+            "version": number or "unknown",
+            "major": 0,
+            "minor": 0,
+            "patch": 0,
+            "status": "warn",
+            "detail": f"Could not parse ES version `{number}`. Proceeding but expect surprises.",
+        }
+    if major < MIN_SUPPORTED_MAJOR:
+        return {
+            "version": number,
+            "major": major,
+            "minor": minor,
+            "patch": patch,
+            "status": "unsupported",
+            "detail": (
+                f"Elasticsearch {number} is below the minimum supported major ({MIN_SUPPORTED_MAJOR}.x). "
+                "This skill renders data-stream-first assets and ECS-aligned mappings that 7.x handles inconsistently. "
+                "Upgrade the cluster (or pin this skill to its pre-8.x version if you are maintaining a 7.x fork)."
+            ),
+        }
+    if major > TESTED_MAX_MAJOR:
+        return {
+            "version": number,
+            "major": major,
+            "minor": minor,
+            "patch": patch,
+            "status": "warn",
+            "detail": (
+                f"Elasticsearch {number} is newer than the latest tested major ({TESTED_MAX_MAJOR}.x). "
+                "The assets should still work, but run `doctor.py` after bootstrap and report any 400 Bad Request in an issue."
+            ),
+        }
+    return {
+        "version": number,
+        "major": major,
+        "minor": minor,
+        "patch": patch,
+        "status": "supported",
+        "detail": f"Elasticsearch {number} is within the tested range.",
+    }
+
+
 def es_request(config: ESConfig, method: str, path: str, payload: dict | None = None) -> dict:
     """Send a request to Elasticsearch with bounded retries on transient failures.
 

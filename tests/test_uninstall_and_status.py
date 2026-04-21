@@ -12,11 +12,59 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import status  # noqa: E402
 import uninstall  # noqa: E402
-from common import ESConfig, SkillError  # noqa: E402
+from common import ESConfig, OBSERVER_PRODUCT_TAG, SkillError  # noqa: E402
 
 
 def _cfg() -> ESConfig:
     return ESConfig(es_url="http://localhost:9200")
+
+
+def _ours_response(asset: str) -> dict:
+    """Build a GET response shaped like the ES API that carries our _meta tag."""
+    meta = {"product": OBSERVER_PRODUCT_TAG, "managed": True}
+    if asset == "ilm_policy":
+        return {"agent-obsv-lifecycle": {"policy": {"_meta": meta}}}
+    if asset == "ingest_pipeline":
+        return {"agent-obsv-normalize": {"_meta": meta, "processors": []}}
+    if asset == "index_template":
+        return {"index_templates": [{"name": "agent-obsv-events-template", "index_template": {"_meta": meta}}]}
+    if asset.startswith("component_template"):
+        return {"component_templates": [{"name": "agent-obsv-ecs-base", "component_template": {"_meta": meta}}]}
+    if asset == "data_stream":
+        return {"data_streams": [{"name": "agent-obsv-events"}]}
+    return {}
+
+
+def _owned_es(*, deletes_fail: set[str] | None = None, deletes_404: set[str] | None = None):
+    """Fake es_request that pretends every asset exists and is owned by us."""
+    deletes_fail = deletes_fail or set()
+    deletes_404 = deletes_404 or set()
+
+    def fake_es(config, method, path, payload=None):
+        if method == "GET":
+            # Detect asset by path
+            if "/_ilm/policy/" in path:
+                return _ours_response("ilm_policy")
+            if "/_ingest/pipeline/" in path:
+                return _ours_response("ingest_pipeline")
+            if "/_index_template/" in path:
+                return _ours_response("index_template")
+            if "/_component_template/" in path:
+                return _ours_response("component_template_ecs_base")
+            if "/_data_stream/" in path:
+                return _ours_response("data_stream")
+            return {"ok": True}
+        if method == "DELETE":
+            for marker in deletes_fail:
+                if marker in path:
+                    raise SkillError("Elasticsearch HTTP 500: boom")
+            for marker in deletes_404:
+                if marker in path:
+                    raise SkillError("Elasticsearch HTTP 404: not_found")
+            return {"acknowledged": True}
+        return {"acknowledged": True}
+
+    return fake_es
 
 
 class UninstallTests(unittest.TestCase):
@@ -33,7 +81,6 @@ class UninstallTests(unittest.TestCase):
             )
         self.assertTrue(summary["dry_run"])
         assets = [step["asset"] for step in summary["plan"]]
-        # Ordering invariant: data_stream first (if present), ilm_policy last.
         self.assertEqual(assets[0], "data_stream")
         self.assertEqual(assets[-1], "ilm_policy")
         self.assertIn("index_template", assets)
@@ -53,12 +100,29 @@ class UninstallTests(unittest.TestCase):
         assets = [step["asset"] for step in summary["plan"]]
         self.assertNotIn("data_stream", assets)
 
-    def test_confirm_treats_404_as_already_absent(self) -> None:
+    def test_owned_resources_are_deleted(self) -> None:
+        with mock.patch.object(uninstall, "es_request", side_effect=_owned_es()):
+            summary = uninstall.run_uninstall(
+                _cfg(),
+                index_prefix="agent-obsv",
+                confirm=True,
+                keep_data_stream=False,
+                kibana_url="",
+                kibana_space="default",
+                kibana_assets_file="",
+            )
+        self.assertTrue(all(item["status"] == "deleted" for item in summary["results"]))
+
+    def test_foreign_resource_is_refused(self) -> None:
+        """If someone else's ILM policy shares our name, we must NOT delete it."""
         def fake_es(config, method, path, payload=None):
+            if method == "GET" and "/_ilm/policy/" in path:
+                return {"agent-obsv-lifecycle": {"policy": {"_meta": {"product": "someone-else"}}}}
+            if method == "GET":
+                return _owned_es()(config, method, path, payload)
             if method == "DELETE":
-                # Mixed: one success, one 404.
-                if "ilm" in path:
-                    raise SkillError("Elasticsearch HTTP 404: not_found")
+                if "ilm/policy" in path:
+                    raise AssertionError("must not delete foreign ilm policy")
                 return {"acknowledged": True}
             return {"acknowledged": True}
 
@@ -72,18 +136,89 @@ class UninstallTests(unittest.TestCase):
                 kibana_space="default",
                 kibana_assets_file="",
             )
-        ilm = next(item for item in summary["results"] if item["asset"] == "ilm_policy")
-        self.assertEqual(ilm["status"], "already_absent")
-        non_ilm = [item for item in summary["results"] if item["asset"] != "ilm_policy"]
-        self.assertTrue(all(item["status"] == "deleted" for item in non_ilm))
+        ilm = next(i for i in summary["results"] if i["asset"] == "ilm_policy")
+        self.assertEqual(ilm["status"], "refused_foreign")
+        self.assertEqual(ilm["owner"], "someone-else")
 
-    def test_confirm_surfaces_real_failure(self) -> None:
+    def test_untagged_resource_is_refused_without_force(self) -> None:
+        """Legacy resource (no _meta tag). Without --force we must refuse."""
         def fake_es(config, method, path, payload=None):
-            if method == "DELETE" and "index_template" in path:
-                raise SkillError("Elasticsearch HTTP 500: boom")
+            if method == "GET" and "/_ilm/policy/" in path:
+                return {"agent-obsv-lifecycle": {"policy": {"phases": {}}}}  # no _meta
+            if method == "GET":
+                return _owned_es()(config, method, path, payload)
+            if method == "DELETE":
+                if "ilm/policy" in path:
+                    raise AssertionError("must not delete untagged without --force")
+                return {"acknowledged": True}
             return {"acknowledged": True}
 
         with mock.patch.object(uninstall, "es_request", side_effect=fake_es):
+            summary = uninstall.run_uninstall(
+                _cfg(),
+                index_prefix="agent-obsv",
+                confirm=True,
+                keep_data_stream=False,
+                kibana_url="",
+                kibana_space="default",
+                kibana_assets_file="",
+                force=False,
+            )
+        ilm = next(i for i in summary["results"] if i["asset"] == "ilm_policy")
+        self.assertEqual(ilm["status"], "refused_untagged")
+
+    def test_force_bypasses_ownership_check(self) -> None:
+        """--force should delete regardless of _meta (even foreign)."""
+        deleted = []
+
+        def fake_es(config, method, path, payload=None):
+            if method == "GET":
+                raise AssertionError("force mode must not call GET")
+            if method == "DELETE":
+                deleted.append(path)
+                return {"acknowledged": True}
+            return {"acknowledged": True}
+
+        with mock.patch.object(uninstall, "es_request", side_effect=fake_es):
+            summary = uninstall.run_uninstall(
+                _cfg(),
+                index_prefix="agent-obsv",
+                confirm=True,
+                keep_data_stream=False,
+                kibana_url="",
+                kibana_space="default",
+                kibana_assets_file="",
+                force=True,
+            )
+        self.assertTrue(all(item["status"] == "deleted" for item in summary["results"]))
+        self.assertEqual(len(deleted), len(summary["results"]))
+
+    def test_absent_resource_is_already_absent(self) -> None:
+        def fake_es(config, method, path, payload=None):
+            if method == "GET":
+                raise SkillError("Elasticsearch HTTP 404: not_found")
+            if method == "DELETE":
+                raise AssertionError("absent resource should not be DELETEd")
+            return {"acknowledged": True}
+
+        with mock.patch.object(uninstall, "es_request", side_effect=fake_es):
+            summary = uninstall.run_uninstall(
+                _cfg(),
+                index_prefix="agent-obsv",
+                confirm=True,
+                keep_data_stream=False,
+                kibana_url="",
+                kibana_space="default",
+                kibana_assets_file="",
+            )
+        self.assertTrue(all(item["status"] == "already_absent" for item in summary["results"]))
+
+    def test_confirm_surfaces_real_failure(self) -> None:
+        with mock.patch.object(
+            uninstall,
+            "es_request",
+            side_effect=_owned_es(deletes_fail={"index_template"}),
+        ):
             summary = uninstall.run_uninstall(
                 _cfg(),
                 index_prefix="agent-obsv",

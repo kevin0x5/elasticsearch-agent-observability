@@ -48,17 +48,17 @@ When a bootstrap run produced a bundle with inline credentials, before calling i
 - [ ] Add the bundle directory to the workspace `.gitignore`. Generated artifacts with any history of secrets should not be committed.
 - [ ] Record rotation date + new credential owner in an ops runbook.
 
-The API key shape (Basic-licence-friendly) looks like:
+The API key shape (Basic-licence-friendly) — this is the **bootstrap admin** key, not the runtime Collector key; see the least-privilege matrix below for the runtime shape:
 
 ```json
 POST /_security/api_key
 {
-  "name": "agent-obsv-collector",
+  "name": "agent-obsv-bootstrap",
   "role_descriptors": {
-    "agent_obsv_ingest": {
-      "cluster": ["monitor", "manage_ilm"],
+    "agent_obsv_bootstrap": {
+      "cluster": ["monitor", "manage_ilm", "manage_index_templates", "manage_pipeline"],
       "index": [
-        { "names": ["<prefix>-*"], "privileges": ["write", "create_index", "auto_configure"] }
+        { "names": ["<prefix>-*"], "privileges": ["manage", "write", "create_index", "auto_configure"] }
       ]
     }
   }
@@ -70,6 +70,50 @@ Pass the returned `encoded` value as `ELASTICSEARCH_API_KEY` and swap the Basic-
 ## Kibana credential note
 
 `--apply-kibana-assets` uses the same ES Basic Auth by default. For production prefer `--kibana-api-key`; the generated wiring already accepts it.
+
+## Least-privilege matrix
+
+Different scripts need different privileges. Do not reuse the bootstrap key for the runtime Collector, and do not reuse either for `uninstall`.
+
+| Script | Cluster privileges | Index privileges on `<prefix>-*` | Why |
+|---|---|---|---|
+| `bootstrap_observability.py --apply-es-assets` | `monitor`, `manage_ilm`, `manage_index_templates`, `manage_pipeline` | `manage`, `create_index`, `auto_configure` | Creates ILM policy, ingest pipeline, component + index templates, and bootstraps the data stream |
+| `bootstrap_observability.py --apply-kibana-assets` | Kibana role with `all` on Saved Objects Management (or API key with the equivalent) | — | Writes data view, searches, Lens, and dashboard |
+| `apply_elasticsearch_assets.py` (standalone) | same as bootstrap apply | same as bootstrap apply | Same surface; split out for CI reuse |
+| **Collector / bridge at runtime** | `monitor` | `write`, `create_index`, `auto_configure` | **Steady-state identity. Never give this key `manage_ilm` / template perms.** This is what should live on production hosts. |
+| `alert_and_diagnose.py` | `monitor` | `read` | Only runs aggregations + writes alert events (optional) |
+| `alert_and_diagnose.py --write-to-es` | `monitor` | `read`, `write` | Adds alert docs to the events data stream |
+| `generate_report.py` | `monitor` | `read` | Read-only aggregations |
+| `validate_state.py` | `monitor` | `read` | Compares rendered assets to live state |
+| `verify_pipeline.py` | `monitor` | `read` | OTLP canary + ES poll |
+| `status.py` | `monitor` | `read` | GETs templates/policy/data stream |
+| `doctor.py` | `monitor` | `read` | Same read-only surface as status + verify |
+| `uninstall.py --confirm` | `monitor`, `manage_ilm`, `manage_index_templates`, `manage_pipeline` | `manage`, `delete_index` | Dangerous; keep a separate short-lived API key for this. Rotate immediately after. |
+
+Rule of thumb: **three keys, not one.**
+
+1. A short-lived **admin key** for bootstrap and uninstall. Create, use, delete.
+2. A long-lived **ingest key** with `write`-only on `<prefix>-*` for the Collector and bridge.
+3. A long-lived **read key** for alerting / reporting / dashboards / diagnostics.
+
+Example ingest-only API key:
+
+```json
+POST /_security/api_key
+{
+  "name": "agent-obsv-collector",
+  "role_descriptors": {
+    "agent_obsv_ingest": {
+      "cluster": ["monitor"],
+      "index": [
+        { "names": ["<prefix>-*"], "privileges": ["write", "create_index", "auto_configure"] }
+      ]
+    }
+  }
+}
+```
+
+The previous `manage_ilm` grant (shown below) is only appropriate for the bootstrap identity, not the runtime Collector.
 
 ## Rules
 

@@ -12,6 +12,7 @@ from apply_elasticsearch_assets import apply_assets, sanity_check
 from common import (
     ESConfig,
     SkillError,
+    check_es_version,
     ensure_dir,
     es_request,
     print_error,
@@ -460,12 +461,19 @@ def _preflight(args: argparse.Namespace, workspace: Path, credentials: tuple[str
             max_retries=0,
         )
         try:
-            es_request(es_config, "GET", "/")
+            version_info = check_es_version(es_config)
         except SkillError as exc:
             raise SkillError(
                 f"Preflight: Elasticsearch at `{args.es_url}` is not reachable ({exc}). "
                 "Fix the URL/credentials before retrying — no files have been written."
             ) from exc
+
+        # Hard-refuse unsupported majors. The rendered assets will either be
+        # rejected by ES or silently misbehave; better to fail fast on disk.
+        if version_info["status"] == "unsupported":
+            raise SkillError(f"Preflight: {version_info['detail']}")
+        if version_info["status"] == "warn":
+            warnings.append(f"ES version: {version_info['detail']}")
 
         if args.apply_kibana_assets:
             kibana_url = args.kibana_url.strip()

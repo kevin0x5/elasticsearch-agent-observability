@@ -698,25 +698,41 @@ def main() -> int:
 
         verify_result: dict[str, Any] | None = None
         verify_path: Path | None = None
+
+        # Persist the runtime bind info so doctor / verify can honour
+        # non-default ports without having to be told. Previously doctor's
+        # port constants drifted away from whatever ``--bridge-http-port``
+        # the operator picked, and the Collector path would be misreported
+        # as down every time. The file is also a cheap hint for humans.
+        runtime_config = {
+            "bridge_bind_host": bridge_bind_host,
+            "bridge_http_port": bridge_http_port,
+            "bridge_endpoint": f"http://{bridge_bind_host}:{bridge_http_port}",
+            "collector_otlp_ports": ["4317", "4318"],
+            "collector_bin": args.collector_bin,
+            "index_prefix": index_prefix,
+            "ingest_mode": args.ingest_mode,
+        }
+        runtime_config_path = output_dir / "runtime-config.json"
+        write_json(runtime_config_path, runtime_config)
+
         if args.verify and args.apply_es_assets and not args.dry_run:
             default_verify_endpoint = f"http://{bridge_bind_host}:{bridge_http_port}"
             verify_endpoint = args.verify_endpoint.strip() or default_verify_endpoint
             collector_log_path = output_dir / "runtime" / "collector.log"
-            verify_args = argparse.Namespace(
-                es_url=args.es_url,
-                es_user=credentials[0] if credentials else "",
-                es_password=credentials[1] if credentials else "",
-                index_prefix=index_prefix,
-                otlp_http_endpoint=verify_endpoint,
-                service_name=args.service_name,
-                poll_attempts=5,
-                poll_backoff=1.5,
-                no_verify_tls=args.no_verify_tls,
-                collector_log=str(collector_log_path) if collector_log_path.exists() else "",
-                output=None,
-            )
             try:
-                verify_result = run_verify_pipeline(verify_args)
+                verify_result = run_verify_pipeline(
+                    es_url=args.es_url,
+                    es_user=credentials[0] if credentials else "",
+                    es_password=credentials[1] if credentials else "",
+                    index_prefix=index_prefix,
+                    otlp_http_endpoint=verify_endpoint,
+                    service_name=args.service_name,
+                    poll_attempts=5,
+                    poll_backoff=1.5,
+                    no_verify_tls=args.no_verify_tls,
+                    collector_log=str(collector_log_path) if collector_log_path.exists() else "",
+                )
                 verify_path = output_dir / "verify.json"
                 write_json(verify_path, verify_result)
                 print()

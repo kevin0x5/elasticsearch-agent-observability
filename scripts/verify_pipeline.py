@@ -406,40 +406,77 @@ def render_text(verdict: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run_verify(args: argparse.Namespace) -> dict[str, Any]:
-    credentials = validate_credential_pair(args.es_user, args.es_password)
+def run_verify(
+    args: argparse.Namespace | None = None,
+    *,
+    es_url: str | None = None,
+    es_user: str = "",
+    es_password: str = "",
+    index_prefix: str = "agent-obsv",
+    otlp_http_endpoint: str = "http://127.0.0.1:14319",
+    service_name: str = "pipeline-verify",
+    poll_attempts: int = DEFAULT_POLL_ATTEMPTS,
+    poll_backoff: float = DEFAULT_POLL_BACKOFF,
+    no_verify_tls: bool = False,
+    collector_log: str = "",
+) -> dict[str, Any]:
+    """Run the end-to-end verify. Accepts either kwargs or a Namespace.
+
+    Callers that already have a Namespace (the CLI ``main()``) can keep
+    passing it; internal callers (``doctor._probe_canary``,
+    ``bootstrap_observability``) should use kwargs and stop constructing
+    argparse.Namespace objects just to satisfy the old signature.
+    """
+    if args is not None:
+        # Back-compat path. Pull everything off the namespace and recurse via
+        # kwargs so the real body lives in exactly one place.
+        return run_verify(
+            es_url=args.es_url,
+            es_user=args.es_user,
+            es_password=args.es_password,
+            index_prefix=args.index_prefix,
+            otlp_http_endpoint=args.otlp_http_endpoint,
+            service_name=getattr(args, "service_name", "pipeline-verify"),
+            poll_attempts=getattr(args, "poll_attempts", DEFAULT_POLL_ATTEMPTS),
+            poll_backoff=getattr(args, "poll_backoff", DEFAULT_POLL_BACKOFF),
+            no_verify_tls=getattr(args, "no_verify_tls", False),
+            collector_log=getattr(args, "collector_log", "") or "",
+        )
+    if es_url is None:
+        raise SkillError("run_verify requires es_url when args is not provided")
+    credentials = validate_credential_pair(es_user, es_password)
     config = ESConfig(
-        es_url=args.es_url,
+        es_url=es_url,
         es_user=credentials[0] if credentials else None,
         es_password=credentials[1] if credentials else None,
-        verify_tls=not args.no_verify_tls,
+        verify_tls=not no_verify_tls,
     )
-    index_prefix = validate_index_prefix(args.index_prefix)
-    ds_name = build_data_stream_name(index_prefix)
+    resolved_prefix = validate_index_prefix(index_prefix)
+    ds_name = build_data_stream_name(resolved_prefix)
     canary_id = f"verify-{uuid.uuid4().hex[:12]}"
 
-    payload = _build_canary_log(service_name=args.service_name, canary_id=canary_id)
-    send = _send_canary(args.otlp_http_endpoint, payload)
+    payload = _build_canary_log(service_name=service_name, canary_id=canary_id)
+    send = _send_canary(otlp_http_endpoint, payload)
     poll: dict[str, Any] = {"found": False, "attempts": 0}
     if send.get("ok"):
         poll = _poll_elasticsearch(
             config,
-            index_prefix=index_prefix,
+            index_prefix=resolved_prefix,
             canary_id=canary_id,
-            attempts=args.poll_attempts,
-            backoff=args.poll_backoff,
+            attempts=poll_attempts,
+            backoff=poll_backoff,
         )
 
     classification = _classify_failure(
         send_result=send,
         poll_result=poll,
-        otlp_endpoint=args.otlp_http_endpoint,
+        otlp_endpoint=otlp_http_endpoint,
         ds_name=ds_name,
-        collector_log=Path(args.collector_log).expanduser().resolve() if args.collector_log else None,
+        collector_log=Path(collector_log).expanduser().resolve() if collector_log else None,
     )
     return {
         "canary_id": canary_id,
-        "otlp_endpoint": args.otlp_http_endpoint,
+        "otlp_endpoint": otlp_http_endpoint,
         "data_stream": ds_name,
         "send": send,
         "poll": poll,
@@ -452,7 +489,18 @@ def run_verify(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     try:
         args = parse_args()
-        result = run_verify(args)
+        result = run_verify(
+            es_url=args.es_url,
+            es_user=args.es_user,
+            es_password=args.es_password,
+            index_prefix=args.index_prefix,
+            otlp_http_endpoint=args.otlp_http_endpoint,
+            service_name=args.service_name,
+            poll_attempts=args.poll_attempts,
+            poll_backoff=args.poll_backoff,
+            no_verify_tls=args.no_verify_tls,
+            collector_log=args.collector_log,
+        )
         print(render_text(result))
         if args.output:
             Path(args.output).expanduser().resolve().write_text(

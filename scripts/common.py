@@ -257,9 +257,69 @@ OBSERVER_PRODUCT_TAG = "elasticsearch-agent-observability"
 # probe listener liveness) and doctor (to classify which path is up). The
 # Collector's gRPC and HTTP receivers live on 4317/4318 by OTel default;
 # the generated OTLP HTTP bridge binds to 14319 by the bootstrap contract.
+# These are fallbacks — when an operator customised ``--bridge-http-port``
+# the bootstrap writes a ``runtime-config.json`` next to the generated
+# artifacts, and callers should prefer ``load_runtime_config`` so doctor
+# does not claim the Collector path is down just because the bridge port
+# moved.
 COLLECTOR_OTLP_PORTS: tuple[str, ...] = ("4317", "4318")
 BRIDGE_OTLP_PORTS: tuple[str, ...] = ("14319",)
 KNOWN_OTLP_PORTS: tuple[str, ...] = COLLECTOR_OTLP_PORTS + BRIDGE_OTLP_PORTS
+
+RUNTIME_CONFIG_FILENAME = "runtime-config.json"
+
+
+def load_runtime_config(search_paths: list[Path] | None = None) -> dict[str, Any]:
+    """Best-effort load of ``runtime-config.json`` written by bootstrap.
+
+    We search (in order): explicit paths, ``$AGENT_OBSV_RUNTIME_CONFIG`` env
+    var, the current working directory, and ``./generated/``. Missing file
+    returns an empty dict — callers fall back to the hard-coded port
+    constants. Malformed JSON is logged to stderr but does not raise; the
+    whole point is to avoid breaking doctor on a bad file.
+    """
+    import os
+
+    candidates: list[Path] = []
+    if search_paths:
+        candidates.extend(p for p in search_paths if p)
+    env_path = os.environ.get("AGENT_OBSV_RUNTIME_CONFIG", "").strip()
+    if env_path:
+        candidates.append(Path(env_path))
+    cwd = Path.cwd()
+    candidates.extend(
+        [
+            cwd / RUNTIME_CONFIG_FILENAME,
+            cwd / "generated" / RUNTIME_CONFIG_FILENAME,
+            DEFAULT_GENERATED_DIR / RUNTIME_CONFIG_FILENAME,
+        ]
+    )
+    for path in candidates:
+        try:
+            if path.is_file():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"⚠️  ignoring unreadable runtime-config at {path}: {exc}", file=sys.stderr)
+            continue
+    return {}
+
+
+def resolve_otlp_ports(runtime_config: dict[str, Any] | None = None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return ``(collector_ports, bridge_ports)`` honouring runtime overrides.
+
+    Falls back to the module-level constants when the config is absent or
+    missing fields. Ports are always stringified so probe code can compare
+    against ``ss`` / ``lsof`` output without extra coercion.
+    """
+    cfg = runtime_config or {}
+    raw_collector = cfg.get("collector_otlp_ports") or list(COLLECTOR_OTLP_PORTS)
+    raw_bridge_port = cfg.get("bridge_http_port")
+    collector_ports = tuple(str(p) for p in raw_collector if p is not None)
+    if raw_bridge_port is not None:
+        bridge_ports: tuple[str, ...] = (str(raw_bridge_port),)
+    else:
+        bridge_ports = BRIDGE_OTLP_PORTS
+    return collector_ports or COLLECTOR_OTLP_PORTS, bridge_ports or BRIDGE_OTLP_PORTS
 
 # Dataset tag used by skill self-audit events. Shares the `internal.*`
 # namespace with sanity_check / pipeline_verify / alert_check so alerting

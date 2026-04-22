@@ -59,7 +59,9 @@ from common import (
     build_ssl_context,
     emit_skill_audit,
     es_request,
+    load_runtime_config,
     print_error,
+    resolve_otlp_ports,
     validate_credential_pair,
     validate_index_prefix,
 )
@@ -70,10 +72,16 @@ DEFAULT_FRESHNESS_MINUTES = 10
 DEFAULT_HEALTHZ_URL = "http://127.0.0.1:14319/healthz"
 DEFAULT_OTLP_HTTP_ENDPOINT = "http://127.0.0.1:14319"
 
-# Aliases kept so existing in-module references read naturally. These point
-# at the shared constants in common.py — do not redefine.
+# Path-port tuples resolved per-run against runtime-config.json (see
+# ``_resolved_ports``). The module-level aliases kept for back-compat in
+# tests default to the hard-coded constants.
 BRIDGE_PATH_PORTS = BRIDGE_OTLP_PORTS
 COLLECTOR_PATH_PORTS = COLLECTOR_OTLP_PORTS
+
+
+def _resolved_ports() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Load runtime-config once per call and return (collector, bridge) ports."""
+    return resolve_otlp_ports(load_runtime_config())
 
 
 def parse_args() -> argparse.Namespace:
@@ -142,7 +150,12 @@ def _probe_healthz(healthz_url: str, *, verify_tls: bool) -> dict[str, Any]:
         return {"status": "fail", "detail": f"cannot reach {healthz_url}: {exc.reason}"}
 
 
-def _classify_paths(listening: dict[str, bool]) -> dict[str, dict[str, Any]]:
+def _classify_paths(
+    listening: dict[str, bool],
+    *,
+    bridge_ports: tuple[str, ...] | None = None,
+    collector_ports: tuple[str, ...] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Split port-listen info into the two data paths.
 
     Returned shape:
@@ -154,12 +167,21 @@ def _classify_paths(listening: dict[str, bool]) -> dict[str, dict[str, Any]]:
 
     A path is ``up`` when every port it owns is listening, ``down`` when none
     are, ``partial`` when some are (collector only — bridge has one port).
+
+    Port tuples default to whatever ``runtime-config.json`` says, and fall
+    back to the hard-coded constants when no config is on disk. Passing them
+    explicitly is mainly useful for tests.
     """
+    if bridge_ports is None or collector_ports is None:
+        resolved_collector, resolved_bridge = _resolved_ports()
+        bridge_ports = bridge_ports or resolved_bridge
+        collector_ports = collector_ports or resolved_collector
+
     def _slice(ports: tuple[str, ...]) -> dict[str, bool]:
         return {p: bool(listening.get(p, False)) for p in ports}
 
-    bridge_slice = _slice(BRIDGE_PATH_PORTS)
-    collector_slice = _slice(COLLECTOR_PATH_PORTS)
+    bridge_slice = _slice(bridge_ports)
+    collector_slice = _slice(collector_ports)
     bridge_up = all(bridge_slice.values())
     col_ups = sum(1 for v in collector_slice.values() if v)
     if col_ups == 0:
@@ -190,7 +212,8 @@ def _probe_processes_and_ports(otlp_endpoint: str, collector_log: str) -> dict[s
     preflight = _local_preflight(otlp_endpoint=otlp_endpoint, collector_log=log_path)
     zombies = preflight.get("zombie_processes") or []
     listening = preflight.get("listening_ports") or {}
-    paths = _classify_paths(listening)
+    collector_ports, bridge_ports = _resolved_ports()
+    paths = _classify_paths(listening, bridge_ports=bridge_ports, collector_ports=collector_ports)
 
     # Zombies are the worst case — they make healthz lie. Always loud.
     if zombies:
@@ -232,7 +255,7 @@ def _probe_processes_and_ports(otlp_endpoint: str, collector_log: str) -> dict[s
         return {
             "status": "warn",
             "detail": (
-                f"Bridge path is listening on {BRIDGE_PATH_PORTS[0]} but the Collector path is "
+                f"Bridge path is listening on {bridge_ports[0]} but the Collector path is "
                 f"{collector_state} (missing: {missing_ports}). Agents can still ship logs/traces "
                 f"via the bridge; the standard Collector OTLP receiver has not recovered."
             ),
@@ -251,8 +274,8 @@ def _probe_processes_and_ports(otlp_endpoint: str, collector_log: str) -> dict[s
         return {
             "status": "warn",
             "detail": (
-                f"Collector path is listening on {COLLECTOR_PATH_PORTS} but the bridge fallback on "
-                f"{BRIDGE_PATH_PORTS[0]} is not. If the Collector exporter stalls, you have no "
+                f"Collector path is listening on {list(collector_ports)} but the bridge fallback on "
+                f"{bridge_ports[0]} is not. If the Collector exporter stalls, you have no "
                 "second path. Start the bridge with `run-otlphttpbridge.sh --daemon`."
             ),
             "listening_ports": listening,
@@ -303,7 +326,15 @@ def _probe_recent_data(config: ESConfig, *, index_prefix: str, freshness_minutes
     try:
         result = es_request(config, "POST", f"/{ds_glob}/_search", payload)
     except SkillError as exc:
-        return {"status": "fail", "detail": f"cannot query ES: {exc}"}
+        # Carry a structured flag so the aggregator can distinguish "ES is
+        # unreachable" from "ES is fine but there is no data" without doing
+        # substring sniffing on detail text. Changing the detail string later
+        # will no longer break the unreachable verdict.
+        return {
+            "status": "fail",
+            "detail": f"cannot query ES: {exc}",
+            "es_unreachable": True,
+        }
     total = ((result.get("hits") or {}).get("total") or {}).get("value", 0)
     services = [
         {"name": b.get("key"), "count": b.get("doc_count", 0)}
@@ -332,23 +363,19 @@ def _probe_recent_data(config: ESConfig, *, index_prefix: str, freshness_minutes
 
 def _probe_canary(args: argparse.Namespace) -> dict[str, Any]:
     """Run a fresh OTLP canary through the endpoint and confirm it hits ES."""
-    import argparse as _argparse
-
-    verify_args = _argparse.Namespace(
-        es_url=args.es_url,
-        es_user=args.es_user,
-        es_password=args.es_password,
-        index_prefix=args.index_prefix,
-        otlp_http_endpoint=args.otlp_http_endpoint,
-        service_name="doctor-canary",
-        poll_attempts=5,
-        poll_backoff=1.5,
-        no_verify_tls=args.no_verify_tls,
-        collector_log=args.collector_log,
-        output=None,
-    )
     try:
-        result = verify_run(verify_args)
+        result = verify_run(
+            es_url=args.es_url,
+            es_user=args.es_user,
+            es_password=args.es_password,
+            index_prefix=args.index_prefix,
+            otlp_http_endpoint=args.otlp_http_endpoint,
+            service_name="doctor-canary",
+            poll_attempts=5,
+            poll_backoff=1.5,
+            no_verify_tls=args.no_verify_tls,
+            collector_log=args.collector_log,
+        )
     except Exception as exc:  # noqa: BLE001
         return {"status": "fail", "detail": f"canary crashed: {exc}"}
     verdict = result.get("verdict")
@@ -385,8 +412,11 @@ def _aggregate(checks: dict[str, dict[str, Any]]) -> str:
     """
     statuses = {name: ch.get("status") for name, ch in checks.items()}
 
-    # If ES itself is unreachable, nothing else can be trusted.
-    if statuses.get("recent_data") == "fail" and "cannot query ES" in (checks.get("recent_data", {}).get("detail", "")):
+    # If ES itself is unreachable, nothing else can be trusted. We look at
+    # the structured ``es_unreachable`` flag the recent_data probe sets, not
+    # a substring of detail text — the latter broke silently whenever the
+    # error message was reworded.
+    if checks.get("recent_data", {}).get("es_unreachable"):
         return "unreachable"
 
     data_plane = [statuses.get("processes_and_ports"), statuses.get("recent_data"), statuses.get("canary")]

@@ -101,24 +101,34 @@ def _extract_meta_product(asset: str, path: str, response: dict) -> tuple[str, s
     """Return (status, owner) for a GET response on a managed resource.
 
     Status is one of: ``ours`` | ``foreign`` | ``tag_missing`` | ``absent``.
+
+    This function tolerates shape surprises (empty dict, nested non-dict values
+    from mocked responses or partial clusters): anything we cannot parse
+    reduces to ``tag_missing`` rather than raising.
     """
+    def _as_dict(v: Any) -> dict:
+        return v if isinstance(v, dict) else {}
+
+    if not isinstance(response, dict):
+        return ("tag_missing", "")
+
     # ILM has the nested shape: {"<name>": {"policy": {"_meta": {...}}}}
     if asset == "ilm_policy":
-        body = next(iter(response.values()), {}) if response else {}
-        meta = ((body.get("policy") or {}).get("_meta") or {})
+        body = _as_dict(next(iter(response.values()), {}))
+        meta = _as_dict(_as_dict(body.get("policy")).get("_meta"))
     elif asset == "ingest_pipeline":
         # {"<name>": {"_meta": {...}, "processors": [...]}}
-        body = next(iter(response.values()), {}) if response else {}
-        meta = body.get("_meta") or {}
+        body = _as_dict(next(iter(response.values()), {}))
+        meta = _as_dict(body.get("_meta"))
     elif asset == "index_template":
         # {"index_templates": [{"name": ..., "index_template": {"_meta": {...}}}]}
         templates = response.get("index_templates") or []
-        body = (templates[0] if templates else {}).get("index_template") or {}
-        meta = body.get("_meta") or {}
+        body = _as_dict((templates[0] if templates else {})).get("index_template")
+        meta = _as_dict(_as_dict(body).get("_meta"))
     elif asset.startswith("component_template"):
         templates = response.get("component_templates") or []
-        body = (templates[0] if templates else {}).get("component_template") or {}
-        meta = body.get("_meta") or {}
+        body = _as_dict((templates[0] if templates else {})).get("component_template")
+        meta = _as_dict(_as_dict(body).get("_meta"))
     elif asset == "data_stream":
         # Data streams don't carry _meta directly in the response shape we rely
         # on, but they are identified unambiguously by name + presence under

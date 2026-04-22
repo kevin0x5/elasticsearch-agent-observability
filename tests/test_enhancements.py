@@ -378,7 +378,7 @@ class InstrumentSnippetTests(unittest.TestCase):
 
 
 class AlertDiagnoseLogicTests(unittest.TestCase):
-    def _make_current(self, error_count: int = 0, total: int = 100, p95_ns: float = 0, tokens: float = 0, retries: float = 0, turn_latency_ms: float = 0) -> dict:
+    def _make_current(self, error_count: int = 0, total: int = 100, p95_ns: float = 0, tokens: float = 0, retries: float = 0, turn_latency_ms: float = 0, top_token_session_key: str = "session-token") -> dict:
         return {
             "aggregations": {
                 "error_count": {"doc_count": error_count},
@@ -394,8 +394,13 @@ class AlertDiagnoseLogicTests(unittest.TestCase):
                 "top_failure_components": {"components": {"buckets": [{"key": "tool", "doc_count": max(error_count - 1, 0)}]}},
                 "top_token_tools": {"buckets": [{"key": "web_search", "doc_count": 10, "token_sum": {"value": tokens}}]},
                 "top_token_models": {"buckets": [{"key": "gpt-5", "doc_count": 10, "token_sum": {"value": tokens}}]},
+                # Token-burning session, ranked by token_sum. _analyze_token_anomaly
+                # must prefer this over top_retry_sessions; regressing to the
+                # retry bucket is what caused the "retry-heavy but cheap session
+                # blamed for token spend" bug.
+                "top_token_sessions": {"buckets": [{"key": top_token_session_key, "doc_count": 5, "token_sum": {"value": tokens}}]},
                 "top_latency_tools": {"buckets": [{"key": "web_search", "doc_count": 10, "p95": {"value": p95_ns}}]},
-                "top_retry_sessions": {"buckets": [{"key": "session-1", "doc_count": 8, "retry_sum": {"value": retries}}]},
+                "top_retry_sessions": {"buckets": [{"key": "session-retry", "doc_count": 8, "retry_sum": {"value": retries}}]},
                 "top_retry_tools": {"buckets": [{"key": "web_search", "doc_count": 8, "retry_sum": {"value": retries}}]},
                 "top_turns_by_latency": {
                     "buckets": [
@@ -449,6 +454,51 @@ class AlertDiagnoseLogicTests(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         self.assertEqual(result["alert_type"], "token_consumption_anomaly")
+
+    def test_token_anomaly_primary_session_comes_from_token_bucket(self) -> None:
+        """Regression: `primary_session` must be the top token-consuming session,
+        not the top retry session. Retry-heavy but token-cheap sessions being
+        blamed for token spend is what motivated the dedicated top_token_sessions
+        aggregation.
+        """
+        current = self._make_current(tokens=10000, top_token_session_key="session-big-spender")
+        result = alert_and_diagnose._analyze_token_anomaly(
+            current,
+            self._make_baseline(tokens=1000),
+            multiplier=3.0,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("session-big-spender", result["root_cause"])
+        self.assertEqual(result["evidence"]["primary_session_source"], "token")
+
+    def test_token_anomaly_falls_back_to_retry_session_when_token_bucket_empty(self) -> None:
+        """When the token-session aggregation is empty (legacy docs without
+        session_id), fall back to the retry-session hot key but flag the
+        fallback in evidence so the RCA is honest about the source.
+        """
+        current = self._make_current(tokens=10000)
+        current["aggregations"]["top_token_sessions"] = {"buckets": []}
+        result = alert_and_diagnose._analyze_token_anomaly(
+            current,
+            self._make_baseline(tokens=1000),
+            multiplier=3.0,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["evidence"]["primary_session_source"], "retry_fallback")
+        self.assertIn("session-retry", result["root_cause"])
+
+    def test_internal_dataset_filter_excludes_all_internal_streams(self) -> None:
+        """Every query against the events stream must filter out internal.*.
+
+        If this regresses to excluding only `internal.sanity_check`, healthy-
+        looking clusters whose traffic is dominated by pipeline_verify /
+        alert_check / skill_audit heartbeats will mask real breakage.
+        """
+        must_not = alert_and_diagnose._internal_dataset_filter()
+        # Must be a single-prefix filter on event.dataset: internal.
+        self.assertEqual(len(must_not), 1)
+        clause = must_not[0]
+        self.assertEqual(clause.get("prefix", {}).get("event.dataset"), "internal.")
 
     def test_latency_degradation_triggers(self) -> None:
         result = alert_and_diagnose._analyze_latency_degradation(

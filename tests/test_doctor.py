@@ -37,6 +37,30 @@ def _args(**overrides) -> argparse.Namespace:
 class DoctorTests(unittest.TestCase):
     # ----- the "bridge ok, collector dead" case from the field ------------
 
+    def test_bridge_up_collector_partial_with_data_is_still_degraded_collector_path(self) -> None:
+        """Collector ``partial`` (one of 4317/4318 listening) must resolve the
+        same as ``down`` for the degraded_collector_path verdict: bridge is
+        still the path keeping us alive, and the operator must be told that
+        the Collector path is broken — not merely ``degraded``."""
+        fake_proc = {
+            "status": "warn",
+            "detail": "Bridge up; Collector partial (only 4317).",
+            "paths": {
+                "bridge": {"status": "up", "listening_ports": {"14319": True}},
+                "collector": {
+                    "status": "partial",
+                    "listening_ports": {"4317": True, "4318": False},
+                },
+            },
+        }
+        fake_recent = {"status": "pass", "detail": "data flowing", "doc_count": 17}
+        with mock.patch.object(doctor, "_probe_healthz", return_value={"status": "pass", "detail": "ok"}):
+            with mock.patch.object(doctor, "_probe_processes_and_ports", return_value=fake_proc):
+                with mock.patch.object(doctor, "_probe_recent_data", return_value=fake_recent):
+                    with mock.patch.object(doctor, "_probe_canary", return_value={"status": "pass", "detail": "ok"}):
+                        result = doctor.run_doctor(_args(skip_canary=False))
+        self.assertEqual(result["verdict"], "degraded_collector_path")
+
     def test_bridge_up_collector_down_with_real_data_is_degraded_collector_path(self) -> None:
         """Real-world case: Collector is <defunct>, but bridge is handling traffic.
 
@@ -130,6 +154,76 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(paths["bridge"]["status"], "down")
         self.assertEqual(paths["collector"]["status"], "down")
 
+    # ----- runtime-config port resolution --------------------------------
+    # Regression: the doctor used to hard-code 14319 for the bridge port and
+    # (4317, 4318) for the collector. Operators who passed
+    # ``--bridge-http-port`` to bootstrap then saw doctor report the bridge
+    # path as `down` even when it was healthy on the custom port. These
+    # tests pin the fix: `_classify_paths` must honour explicit port tuples,
+    # and `resolve_otlp_ports` must thread bootstrap's runtime-config.json
+    # into that path.
+
+    def test_classify_paths_honours_custom_bridge_port(self) -> None:
+        paths = doctor._classify_paths(
+            {"4317": True, "4318": True, "24319": True},
+            bridge_ports=("24319",),
+            collector_ports=("4317", "4318"),
+        )
+        self.assertEqual(paths["bridge"]["status"], "up")
+        self.assertEqual(paths["collector"]["status"], "up")
+
+    def test_classify_paths_custom_bridge_down_when_only_default_listens(self) -> None:
+        """If runtime-config says bridge moved to 24319, an older process still
+        listening on the default 14319 must NOT be reported as the bridge."""
+        paths = doctor._classify_paths(
+            {"14319": True},
+            bridge_ports=("24319",),
+            collector_ports=("4317", "4318"),
+        )
+        self.assertEqual(paths["bridge"]["status"], "down")
+
+    def test_resolve_otlp_ports_reads_runtime_config_overrides(self) -> None:
+        from common import resolve_otlp_ports
+        collector, bridge = resolve_otlp_ports(
+            {"collector_otlp_ports": [5317, 5318], "bridge_http_port": 24319}
+        )
+        self.assertEqual(collector, ("5317", "5318"))
+        self.assertEqual(bridge, ("24319",))
+
+    def test_resolve_otlp_ports_falls_back_to_defaults(self) -> None:
+        from common import BRIDGE_OTLP_PORTS, COLLECTOR_OTLP_PORTS, resolve_otlp_ports
+        collector, bridge = resolve_otlp_ports({})
+        self.assertEqual(collector, COLLECTOR_OTLP_PORTS)
+        self.assertEqual(bridge, BRIDGE_OTLP_PORTS)
+
+    def test_load_runtime_config_from_env_var_is_respected(self) -> None:
+        """End-to-end of the bootstrap → doctor hand-off: a config file whose
+        path is set in $AGENT_OBSV_RUNTIME_CONFIG must be picked up by
+        ``_resolved_ports``. This is what stops doctor from claiming the
+        Collector path is down when an operator moved the bridge port.
+        """
+        import json
+        import os
+        import tempfile
+        from common import load_runtime_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "runtime-config.json"
+            cfg_path.write_text(json.dumps({"bridge_http_port": 24319, "collector_otlp_ports": ["4317", "4318"]}))
+            old = os.environ.get("AGENT_OBSV_RUNTIME_CONFIG")
+            os.environ["AGENT_OBSV_RUNTIME_CONFIG"] = str(cfg_path)
+            try:
+                loaded = load_runtime_config()
+                self.assertEqual(loaded.get("bridge_http_port"), 24319)
+                collector, bridge = doctor._resolved_ports()
+                self.assertEqual(bridge, ("24319",))
+                self.assertEqual(collector, ("4317", "4318"))
+            finally:
+                if old is None:
+                    os.environ.pop("AGENT_OBSV_RUNTIME_CONFIG", None)
+                else:
+                    os.environ["AGENT_OBSV_RUNTIME_CONFIG"] = old
+
     # ----- the central lie-detection case ---------------------------------
 
     def test_healthz_ok_but_data_plane_dead_is_broken(self) -> None:
@@ -203,7 +297,14 @@ class DoctorTests(unittest.TestCase):
                 with mock.patch.object(
                     doctor,
                     "_probe_recent_data",
-                    return_value={"status": "fail", "detail": "cannot query ES: connection refused"},
+                    # _probe_recent_data sets es_unreachable=True when the
+                    # cluster itself cannot be queried; _aggregate keys off
+                    # that structured flag (not string matching on `detail`).
+                    return_value={
+                        "status": "fail",
+                        "detail": "cannot query ES: connection refused",
+                        "es_unreachable": True,
+                    },
                 ):
                     result = doctor.run_doctor(_args())
         self.assertEqual(result["verdict"], "unreachable")

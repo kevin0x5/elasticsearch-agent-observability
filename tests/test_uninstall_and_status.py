@@ -234,8 +234,55 @@ class UninstallTests(unittest.TestCase):
 
 
 class StatusTests(unittest.TestCase):
-    def _make_es(self, *, present: set[str], ds_present: bool = True, ds_count: int = 42):
-        """Build a fake es_request that answers by path."""
+    def _make_es(
+        self,
+        *,
+        present: set[str],
+        ds_present: bool = True,
+        ds_count: int = 42,
+        foreign: set[str] | None = None,
+        untagged: set[str] | None = None,
+    ):
+        """Build a fake es_request that answers by path.
+
+        ``present`` = fully ours (carries our _meta.product tag).
+        ``foreign`` = exists but tagged by someone else.
+        ``untagged`` = exists but predates _meta tagging.
+        """
+        foreign = foreign or set()
+        untagged = untagged or set()
+
+        def _asset_for(path: str) -> str | None:
+            if "/_ilm/policy/" in path:
+                return "ilm_policy"
+            if "/_ingest/pipeline/" in path:
+                return "ingest_pipeline"
+            if "/_index_template/" in path:
+                return "index_template"
+            if "/_component_template/" in path:
+                return "component_template_ecs_base"
+            return None
+
+        def _untagged_response(asset: str) -> dict:
+            # Same shape as _ours_response but with no _meta at all.
+            if asset == "ilm_policy":
+                return {"agent-obsv-lifecycle": {"policy": {}}}
+            if asset == "ingest_pipeline":
+                return {"agent-obsv-normalize": {"processors": []}}
+            if asset == "index_template":
+                return {"index_templates": [{"name": "agent-obsv-events-template", "index_template": {}}]}
+            return {"component_templates": [{"name": "agent-obsv-ecs-base", "component_template": {}}]}
+
+        def _foreign_response(asset: str) -> dict:
+            meta = {"product": "some-other-skill"}
+            if asset == "ilm_policy":
+                return {"agent-obsv-lifecycle": {"policy": {"_meta": meta}}}
+            if asset == "ingest_pipeline":
+                return {"agent-obsv-normalize": {"_meta": meta, "processors": []}}
+            if asset == "index_template":
+                return {"index_templates": [{"name": "agent-obsv-events-template", "index_template": {"_meta": meta}}]}
+            return {"component_templates": [{"name": "agent-obsv-ecs-base", "component_template": {"_meta": meta}}]}
+
         def fake_es(config, method, path, payload=None):
             if path == "/":
                 return {"version": {"number": "9.0.0"}}
@@ -254,10 +301,16 @@ class StatusTests(unittest.TestCase):
                         }
                     ]
                 }
-            # Asset probes: present => 200, absent => 404.
-            for label in present:
-                if label in path:
-                    return {"ok": True}
+            asset = _asset_for(path)
+            # Match by coarse label-in-path (legacy) for presence membership.
+            def _matches(labels: set[str]) -> bool:
+                return any(label in path for label in labels)
+            if _matches(foreign):
+                return _foreign_response(asset or "index_template")
+            if _matches(untagged):
+                return _untagged_response(asset or "index_template")
+            if _matches(present):
+                return _ours_response(asset or "index_template")
             raise SkillError("Elasticsearch HTTP 404: not_found")
         return fake_es
 
@@ -304,6 +357,40 @@ class StatusTests(unittest.TestCase):
         text = status.render_text(result)
         self.assertIn("READY", text)
         self.assertIn("doc_count=7", text)
+
+    def test_foreign_owner_is_surfaced(self) -> None:
+        """Foreign-tagged resource must flip overall to `foreign`, not `ready`.
+
+        Silently reporting ready would mislead operators into thinking the skill
+        is installed correctly when another product is squatting on the name.
+        """
+        fake = self._make_es(
+            present={"ilm/policy", "ingest/pipeline", "component_template"},
+            foreign={"index_template"},
+            ds_present=True,
+        )
+        with mock.patch.object(status, "es_request", side_effect=fake):
+            result = status.run_status(_cfg(), index_prefix="agent-obsv")
+        self.assertEqual(result["overall"], "foreign")
+        self.assertIn("index_template", result["foreign"])
+        # Owner must be surfaced so operators know who to ask.
+        tmpl = next(c for c in result["checks"] if c["asset"] == "index_template")
+        self.assertEqual(tmpl["owner"], "some-other-skill")
+        text = status.render_text(result)
+        self.assertIn("FOREIGN", text)
+        self.assertIn("some-other-skill", text)
+
+    def test_untagged_owner_degrades(self) -> None:
+        """Legacy (no _meta.product) install should degrade, not report ready."""
+        fake = self._make_es(
+            present={"ilm/policy", "ingest/pipeline", "component_template"},
+            untagged={"index_template"},
+            ds_present=True,
+        )
+        with mock.patch.object(status, "es_request", side_effect=fake):
+            result = status.run_status(_cfg(), index_prefix="agent-obsv")
+        self.assertEqual(result["overall"], "degraded")
+        self.assertIn("index_template", result["untagged"])
 
 
 if __name__ == "__main__":

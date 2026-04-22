@@ -21,6 +21,7 @@ from typing import Any
 
 from common import (
     ESConfig,
+    OBSERVER_PRODUCT_TAG,
     SkillError,
     asset_names,
     es_request,
@@ -28,6 +29,7 @@ from common import (
     validate_credential_pair,
     validate_index_prefix,
 )
+from uninstall import _extract_meta_product
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,16 +43,57 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _probe(config: ESConfig, path: str) -> tuple[str, str]:
-    """HEAD-ish probe via GET. ``present`` / ``absent`` / ``error`` + detail."""
+# Assets we spot-check for ownership. Data streams and ILM/pipeline/templates
+# are the resources where a foreign install could silently collide on the
+# prefixed name — ``status`` reporting ``ready`` on those would mislead an
+# operator into thinking the skill is installed correctly when in reality it
+# is somebody else's. We piggy-back on the same parser uninstall uses so the
+# two scripts cannot drift.
+_OWNERSHIP_AWARE_ASSETS = {
+    "ilm_policy",
+    "ingest_pipeline",
+    "component_template_ecs_base",
+    "component_template_settings",
+    "index_template",
+}
+
+
+def _probe(config: ESConfig, path: str, *, asset: str | None = None) -> tuple[str, str, str]:
+    """GET probe that also returns ownership when an asset name is given.
+
+    Returns ``(status, detail, owner)`` where status is one of:
+    ``present`` (ours), ``foreign`` (exists but tagged differently),
+    ``untagged`` (exists, predates _meta tagging — treat as degraded),
+    ``absent`` or ``error``. When ``asset`` is ``None`` we keep the old
+    presence-only behaviour.
+    """
     try:
-        es_request(config, "GET", path)
-        return ("present", "")
+        response = es_request(config, "GET", path)
     except SkillError as exc:
         msg = str(exc)
         if "404" in msg or "not_found" in msg.lower():
-            return ("absent", "")
-        return ("error", msg)
+            return ("absent", "", "")
+        return ("error", msg, "")
+    if asset is None or asset not in _OWNERSHIP_AWARE_ASSETS:
+        return ("present", "", "")
+    owner_status, owner = _extract_meta_product(asset, path, response)
+    if owner_status == "ours":
+        return ("present", "", owner)
+    if owner_status == "foreign":
+        return (
+            "foreign",
+            f"exists but tagged `{owner}`, not `{OBSERVER_PRODUCT_TAG}`",
+            owner,
+        )
+    if owner_status == "tag_missing":
+        return (
+            "untagged",
+            "exists without a _meta.product tag (legacy install?)",
+            "",
+        )
+    if owner_status == "absent":
+        return ("absent", "", "")
+    return ("error", owner, "")
 
 
 def _data_stream_health(config: ESConfig, name: str) -> dict[str, Any]:
@@ -96,16 +139,20 @@ def run_status(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
         ("component_template_settings", f"/_component_template/{names['component_template_settings']}"),
         ("index_template", f"/_index_template/{names['index_template']}"),
     ]:
-        status, detail = _probe(config, path)
-        entry = {"asset": label, "status": status}
+        status_value, detail, owner = _probe(config, path, asset=label)
+        entry: dict[str, str] = {"asset": label, "status": status_value}
         if detail:
             entry["detail"] = detail
+        if owner:
+            entry["owner"] = owner
         checks.append(entry)
 
     data_stream = _data_stream_health(config, names["data_stream"])
 
     missing = [c["asset"] for c in checks if c["status"] == "absent"]
     errored = [c["asset"] for c in checks if c["status"] == "error"]
+    foreign = [c["asset"] for c in checks if c["status"] == "foreign"]
+    untagged = [c["asset"] for c in checks if c["status"] == "untagged"]
     if data_stream.get("status") == "absent":
         missing.append("data_stream")
     if data_stream.get("status") == "error":
@@ -113,7 +160,12 @@ def run_status(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
 
     if errored:
         overall = "error"
-    elif missing:
+    elif foreign:
+        # Foreign ownership is worse than "missing" — deleting via uninstall
+        # would refuse (correctly), and operators should be told that another
+        # product is squatting on these names before they proceed.
+        overall = "foreign"
+    elif missing or untagged:
         overall = "degraded"
     else:
         overall = "ready"
@@ -125,15 +177,28 @@ def run_status(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
         "data_stream": data_stream,
         "missing": missing,
         "errored": errored,
+        "foreign": foreign,
+        "untagged": untagged,
     }
 
 
 def render_text(result: dict[str, Any]) -> str:
-    icons = {"present": "✓", "absent": "✗", "error": "!", "ready": "✓", "degraded": "✗", "unknown": "?"}
+    icons = {
+        "present": "✓",
+        "absent": "✗",
+        "error": "!",
+        "foreign": "⚠",
+        "untagged": "?",
+        "ready": "✓",
+        "degraded": "✗",
+        "unknown": "?",
+    }
     lines = [f"[{icons.get(result['overall'], '?')} {result['overall'].upper()}] prefix=`{result['index_prefix']}`"]
     for check in result["checks"]:
         icon = icons.get(check["status"], "?")
         line = f"  {icon} {check['asset']}: {check['status']}"
+        if check.get("owner"):
+            line += f"  [owner={check['owner']}]"
         if check.get("detail"):
             line += f"  — {check['detail']}"
         lines.append(line)
@@ -147,6 +212,14 @@ def render_text(result: dict[str, Any]) -> str:
         lines.append("  ✗ data_stream: absent")
     else:
         lines.append(f"  ! data_stream: error — {ds.get('detail', 'unknown')}")
+    if result.get("foreign"):
+        lines.append("")
+        lines.append(f"Foreign: {', '.join(result['foreign'])}")
+        lines.append("Another product owns these names; uninstall will refuse by design.")
+    if result.get("untagged"):
+        lines.append("")
+        lines.append(f"Untagged: {', '.join(result['untagged'])}")
+        lines.append("Legacy install detected (no _meta.product). Re-run bootstrap to re-tag.")
     if result["missing"]:
         lines.append("")
         lines.append(f"Missing: {', '.join(result['missing'])}")
@@ -176,6 +249,7 @@ def main() -> int:
             return 0
         if result["overall"] == "degraded":
             return 2
+        # foreign / error → 1 (loud failure)
         return 1
     except SkillError as exc:
         print_error(str(exc))

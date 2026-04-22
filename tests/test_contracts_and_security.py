@@ -84,9 +84,9 @@ class ContractsAndSecurityTests(unittest.TestCase):
 
     def test_spanmetrics_dimensions_are_normalized(self) -> None:
         normalized = render_collector_config._normalize_spanmetrics_dimensions(
-            ["service.name", " event.outcome ", "service.name", "", "gen_ai.agent.tool_name"]
+            ["service.name", " event.outcome ", "service.name", "", "gen_ai.tool.name"]
         )
-        self.assertEqual(normalized, ["service.name", "event.outcome", "gen_ai.agent.tool_name"])
+        self.assertEqual(normalized, ["service.name", "event.outcome", "gen_ai.tool.name"])
 
     def test_render_config_supports_filelog_receiver(self) -> None:
         rendered = render_collector_config.render_config(
@@ -149,15 +149,15 @@ class ContractsAndSecurityTests(unittest.TestCase):
         self.assertIn("service.name", props)
         self.assertIn("trace.id", props)
         self.assertIn("gen_ai.usage.input_tokens", props)
-        self.assertIn("gen_ai.agent.tool_name", props)
+        self.assertIn("gen_ai.tool.name", props)
         self.assertNotIn("captured_at", props)
-        self.assertIn("gen_ai.agent.component_type", props)
+        self.assertIn("gen_ai.agent_ext.component_type", props)
         self.assertIn("gen_ai.guardrail.action", props)
         self.assertIn("gen_ai.guardrail.category", props)
         self.assertIn("gen_ai.evaluation.score", props)
         self.assertIn("gen_ai.evaluation.outcome", props)
-        self.assertIn("gen_ai.agent.retrieval_latency_ms", props)
-        self.assertIn("gen_ai.agent.cache_hit", props)
+        self.assertIn("gen_ai.agent_ext.retrieval_latency_ms", props)
+        self.assertIn("gen_ai.agent_ext.cache_hit", props)
 
     def test_ilm_policy_has_tiered_phases(self) -> None:
         ilm = render_es_assets.build_ilm_policy(30)
@@ -293,7 +293,7 @@ class ContractsAndSecurityTests(unittest.TestCase):
         payload = generate_report.search_payload("now-24h")
         range_clause = payload["query"]["bool"]["filter"][0]["range"]
         self.assertIn("@timestamp", range_clause)
-        self.assertIn("gen_ai.agent.tool_name", str(payload["aggs"]))
+        self.assertIn("gen_ai.tool.name", str(payload["aggs"]))
         must_not = payload["query"]["bool"]["must_not"]
         self.assertTrue(any(clause.get("term", {}).get("event.dataset") == "internal.sanity_check" for clause in must_not))
 

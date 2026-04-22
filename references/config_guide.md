@@ -106,7 +106,7 @@ Every apply run should be followed by `verify_pipeline.py`. `bootstrap_observabi
 
 What it does:
 
-1. Sends one OTLP/HTTP JSON log carrying a unique `gen_ai.agent.verify_id` to the configured endpoint (bridge by default, Collector HTTP receiver if overridden).
+1. Sends one OTLP/HTTP JSON log carrying a unique `gen_ai.agent_ext.verify_id` to the configured endpoint (bridge by default, Collector HTTP receiver if overridden).
 2. Polls `<prefix>-events*` for that id with a short exponential backoff.
 3. Emits a verdict: `ok` / `contract_broken` / `sent_but_lost` / `transport_unreachable` / `transport_rejected`, each with a concrete `next_step`.
 

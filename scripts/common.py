@@ -362,8 +362,8 @@ def emit_skill_audit(
         "event.dataset": SKILL_AUDIT_DATASET,
         "service.name": "elasticsearch-agent-observability",
         "observer.product": OBSERVER_PRODUCT_TAG,
-        "gen_ai.agent.signal_type": "skill_audit",
-        "gen_ai.agent.tool_name": tool_name,
+        "gen_ai.operation.name": "skill_audit",
+        "gen_ai.tool.name": tool_name,
         "skill.verdict": verdict,
     }
     if duration_ms is not None:

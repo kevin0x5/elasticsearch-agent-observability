@@ -1,10 +1,80 @@
 # elasticsearch-agent-observability
 
-Bootstrap observability for AI agents on Elasticsearch + OpenTelemetry + Kibana.
+Elasticsearch backend for AI agent observability. One bootstrap gives you ES storage, Kibana dashboards, and automated RCA alerting.
 
-**Three signals, one data stream.** Traces, logs, and metrics all land in the same `<prefix>-events` data stream with a shared ECS schema, so correlation across signals is a KQL filter, not a join. The rendered Collector config wires OTLP → spanmetrics → Elasticsearch exporters for all three; the Kibana dashboard ships with latency P50/P95 lines, token-usage area chart, and event-rate breakdown side by side with Discover drilldown.
+Schema follows [OTel GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). Plug in [OpenLLMetry](https://github.com/traceloop/openllmetry) or any OTel instrumentation SDK — data lands in ES, dashboards light up.
 
-One command renders the Collector config, Elasticsearch index/pipeline/ILM assets, Kibana dashboards, an end-to-end verification canary, and (optionally) a Node/TS instrumentation starter or a zero-code LLM proxy bundle.
+## What you get
+
+**One command, full ES stack:**
+
+```
+bootstrap_observability.py
+ → index template + component templates + ILM (hot/warm/cold/delete)
+ → ingest pipeline (OTel→ECS normalization, event.outcome derivation, sensitive field redaction)
+ → Kibana dashboard (latency P50/P95, token usage, tool/model/session breakdown, failure hotspots)
+ → OTel Collector config (spanmetrics + ES exporter)
+ → OTLP HTTP bridge fallback path
+```
+
+**6 RCA alert analyzers:**
+
+| Analyzer | Detects |
+|----------|---------|
+| `error_rate_spike` | error rate jump — pinpoints the tool / model / session |
+| `token_consumption_anomaly` | token burn anomaly — finds the top-spending session and tool |
+| `latency_degradation` | P95 latency regression — locates the slowest turn |
+| `session_failure_hotspot` | failures concentrated in a few sessions |
+| `retry_storm` | retry loop — finds the tool stuck in a cycle |
+| `long_turn_hotspot` | single turn stuck — locates the blocking component |
+
+When multiple alerts fire in the same window, they're merged into causal chains (`correlation.chains`) with confidence scores.
+
+**Pipeline health diagnostic (`doctor.py`):**
+
+Refuses to let `/healthz` lie. 5 independent checks — healthz, process/port state (with zombie detection), real ES data, OTLP canary — collapsed into one honest verdict:
+
+- `healthy` — all clear
+- `degraded_collector_path` — bridge fallback is saving you, Collector is down
+- `broken` — data plane is dead (healthz may still say 200)
+- `unreachable` — ES itself is down
+
+**Zero-code ingestion path:**
+
+Don't want to touch agent code? Generate an LLM proxy bundle (LiteLLM docker-compose), point the agent's `OPENAI_API_BASE` at it. Done.
+
+## Data flow
+
+```
+Agent code
+  │  pip install traceloop-sdk / or use the generated LLM proxy
+  ▼
+OTel SDK (gen_ai.* spans)
+  │
+  ▼
+OTel Collector ──→ ES index template + ingest pipeline ──→ Kibana
+  │                                                          │
+  └── OTLP HTTP bridge (fallback) ─────────────────────────────┘
+```
+
+## Schema
+
+OTel GenAI Semantic Conventions v1.40+ standard fields are used directly. Extension fields live under `gen_ai.agent_ext.*`:
+
+| Field | Source |
+|-------|--------|
+| `gen_ai.request.model` | OTel standard |
+| `gen_ai.tool.name` | OTel standard |
+| `gen_ai.conversation.id` | OTel standard |
+| `gen_ai.operation.name` | OTel standard |
+| `gen_ai.usage.input_tokens` / `.output_tokens` | OTel standard |
+| `error.type` | OTel/ECS standard |
+| `gen_ai.agent_ext.turn_id` | extension (OTel proposal pending) |
+| `gen_ai.agent_ext.component_type` | extension |
+| `gen_ai.agent_ext.cost` | extension |
+| `gen_ai.agent_ext.retry_count` | extension |
+
+Full dictionary: [`references/telemetry_schema.md`](references/telemetry_schema.md).
 
 ## Quick start
 
@@ -12,7 +82,6 @@ One command renders the Collector config, Elasticsearch index/pipeline/ILM asset
 git clone https://github.com/kevin0x5/elasticsearch-agent-observability.git
 cd elasticsearch-agent-observability
 
-# Apply ES + Kibana assets, run the canary, leave artifacts in generated/bootstrap/
 python scripts/bootstrap_observability.py \
   --workspace /path/to/your/agent \
   --output-dir generated/bootstrap \
@@ -23,230 +92,51 @@ python scripts/bootstrap_observability.py \
   --apply-kibana-assets
 ```
 
-When the run finishes:
+Hook up OpenLLMetry on the agent side:
 
-- `generated/bootstrap/verify.json` says whether the OTLP → ES path is actually live. **If `verdict != "ok"`, follow the `next_step` field — usually "switch the agent to the OTLP HTTP bridge at `http://127.0.0.1:14319`".**
-- `generated/bootstrap/bootstrap-summary.md` is the human readable index.
-- Kibana already has the data view and the starter dashboard.
+```python
+from traceloop.sdk import Traceloop
+Traceloop.init()
+```
 
-To go further, read [`references/post_bootstrap_playbook.md`](references/post_bootstrap_playbook.md).
+Data flows into ES, Kibana dashboards are live.
 
-## What you get
-
-After one bootstrap you have a working observability backbone for your agent: a Kibana surface that shows real cost, latency, and failure patterns; an alert flow that doesn't just chart anomalies but also explains them; and a lightweight feedback loop that catches config drift and pipeline breakage before they become outages. The skill keeps you honest — every dashboard panel and every alert rule is wired to a specific data field, so what you see is what your agent actually emitted, not a smoothed-over template.
-
-Concretely, the questions it lets you answer:
-
-- Where is my token budget going, and when did it spike?
-- Which tools and models are slow, error-prone, or both?
-- Why was last Tuesday slow — down to the session, the turn, and a generated root cause?
-- When multiple alerts fire in the same window, are they the same incident? (`alert_and_diagnose` now emits `correlation.chains` — alerts sharing a session/tool/model/component are merged into a single chain with a confidence score.)
-- Did the agent actually run the diagnostic, or claim it did? (every `doctor` / `alert_and_diagnose` run writes a `internal.skill_audit` record with verdict + evidence keys, so the skill is observable about itself.)
-- Did anyone change my cluster config since the last deploy?
-- Is the pipeline live right now, or am I looking at stale data?
-- How do I keep an incident's findings around after the fix ships?
-
-Two ways to feed it data, picked by whether you own the agent code:
-
-- **You own the agent (Python or Node/TS)** — install the generated instrumentation starter and OpenAI/Anthropic calls become traced spans automatically.
-- **You don't own the agent** — run the generated LLM proxy bundle (`docker compose up -d`) and point the agent's `OPENAI_API_BASE` at it. No source changes.
-
-## Common commands
-
-Each step builds on the previous one.
-
-### 1. Bootstrap
+## Commands
 
 ```bash
-python scripts/bootstrap_observability.py \
-  --workspace <workspace> --output-dir generated/bootstrap \
-  --es-url <url> --es-user <user> --es-password '<pwd>' \
-  --apply-es-assets --apply-kibana-assets
+# Pipeline health (don't trust /healthz, use this)
+python scripts/doctor.py --es-url <url>
+
+# Last 15 min alert + RCA
+python scripts/alert_and_diagnose.py --es-url <url> --time-range now-15m
+
+# What's deployed
+python scripts/status.py --es-url <url>
+
+# Config drift detection
+python scripts/validate_state.py --es-url <url> --assets-dir generated/bootstrap/elasticsearch
+
+# End-to-end canary
+python scripts/verify_pipeline.py --es-url <url> --otlp-http-endpoint http://127.0.0.1:14319
+
+# Uninstall
+python scripts/uninstall.py --es-url <url> --confirm
 ```
-
-The run ends with an automatic verify; skip it with `--no-verify` if needed.
-
-### 2. Is the pipeline actually live? (use this before trusting anything)
-
-```bash
-python scripts/doctor.py \
-  --es-url <url> --es-user <user> --es-password '<pwd>' \
-  --index-prefix <prefix>
-```
-
-**Why this and not `/healthz`:** the bridge's `/healthz` returns 200 as soon as its HTTP listener is up. It does **not** prove the Collector is alive, that port 4318 is listening, or that real data is reaching ES. We have seen setups where healthz is green, the Collector is `<defunct>`, and agents silently lose telemetry. `doctor.py` runs four independent checks — healthz, process/port state (split into bridge and Collector paths, with zombie detection), real agent data in the last N minutes, and a live OTLP canary — and collapses them into an honest verdict:
-
-- `healthy` — all paths up, real data flowing, canary landed
-- `degraded_collector_path` — **the common half-failure**: bridge is live and agents are still writing to ES via it, but the Collector's 4317/4318 receiver is down. The fallback is saving you; the standard path needs repair.
-- `degraded` — any other combination of warnings
-- `broken` — the data plane is dead (healthz may still lie about it)
-- `unreachable` — ES itself is down
-
-Exit `0` = healthy, `2` = any degraded or broken state (read per-check `fix` lines), `1` = ES unreachable.
-
-### 3. Re-verify OTLP → ES end to end
-
-```bash
-python scripts/verify_pipeline.py \
-  --es-url <url> --es-user <user> --es-password '<pwd>' \
-  --otlp-http-endpoint http://127.0.0.1:14319
-```
-
-Exit `0` = live, `2` = sent but lost / shape wrong (read `next_step`), `1` = transport unreachable.
-
-### 4. Diagnose recent traffic
-
-```bash
-python scripts/alert_and_diagnose.py \
-  --es-url <url> --index-prefix <prefix> --time-range now-15m
-```
-
-Add `--store-to-insight <path-to-store.py>` to archive RCA conclusions to [`elasticsearch-insight-store`](https://github.com/kevin0x5/elasticsearch-insight-store).
-
-### 5. Detect cluster drift
-
-```bash
-python scripts/validate_state.py \
-  --es-url <url> --assets-dir generated/bootstrap/elasticsearch
-```
-
-### 6. Inspect what is actually deployed
-
-```bash
-python scripts/status.py \
-  --es-url <url> --index-prefix <prefix>
-```
-
-Exit `0` = all assets present, `2` = some missing (names are listed), `1` = ES unreachable.
-
-### 7. Tear it all down
-
-```bash
-# Dry-run first (default): prints the delete plan, touches nothing.
-python scripts/uninstall.py --es-url <url> --index-prefix <prefix>
-
-# Actually delete:
-python scripts/uninstall.py --es-url <url> --index-prefix <prefix> --confirm
-```
-
-Only assets matching the prefix are removed; 404s are treated as "already gone". Add `--keep-data-stream` when you only want to rerender templates. Pass `--kibana-url` + `--kibana-assets-file generated/bootstrap/elasticsearch/kibana-saved-objects.json` to also remove the dashboards.
-
-### Running the Collector without orphaning it
-
-```bash
-./generated/bootstrap/run-collector.sh --daemon   # survives shell exit
-./generated/bootstrap/run-collector.sh --status   # alive?
-./generated/bootstrap/run-collector.sh --stop     # stop daemon
-```
-
-The default mode (no args) is foreground, which is what `systemd` / `docker` / `tmux` expect. `--daemon` uses `setsid` + `nohup` + a PID file so the Collector does not become `<defunct>` when the shell that launched it exits — the exact failure mode that keeps `/healthz` returning 200 while the data plane is dead. `run-otlphttpbridge.sh` supports the same contract.
-
-### Optional: zero-code path for an upstream OSS agent
-
-```bash
-python scripts/bootstrap_observability.py ... --generate-llm-proxy
-cd generated/bootstrap/llm-proxy
-cp .env.example .env   # paste OPENAI_API_KEY
-docker compose up -d
-# then point the agent at http://localhost:4000/v1
-```
-
-### Optional: Node.js / TypeScript instrumentation starter
-
-```bash
-python scripts/bootstrap_observability.py ... \
-  --generate-instrument-snippet --instrument-runtime node
-# then in the TS agent project:
-node --import ./generated/bootstrap/node-instrumentation/agent-otel-bootstrap.mjs dist/index.js
-```
-
-## Generated output
-
-Default `--output-dir generated/bootstrap/`:
-
-```text
-generated/bootstrap/
-├── discovery.json
-├── bootstrap-summary.md
-├── verify.json                      # canary verdict (auto-runs after apply)
-├── otel-collector.generated.yaml
-├── run-collector.sh + agent-otel.env
-├── otlphttpbridge.py
-├── run-otlphttpbridge.sh + agent-otel-bridge.env
-├── elasticsearch/
-│   ├── component-template-*.json
-│   ├── index-template.json
-│   ├── ingest-pipeline.json
-│   ├── ilm-policy.json
-│   ├── kibana-saved-objects.{json,ndjson}
-│   ├── apply-summary.json
-│   └── sanity-check.json
-├── node-instrumentation/            # only with --instrument-runtime node|auto on a TS workspace
-│   ├── agent-otel-bootstrap.mjs
-│   └── README.md
-├── llm-proxy/                       # only with --generate-llm-proxy
-│   ├── docker-compose.yaml
-│   ├── config.yaml
-│   ├── .env.example
-│   └── README.md
-├── elastic-native/                  # only with --ingest-mode elastic-agent-fleet | apm-otlp-hybrid
-│   └── ... (APM env, surface manifest, RUM, profiling, ...)
-└── agent_otel_bootstrap.py          # only with --generate-instrument-snippet --instrument-runtime python
-```
-
-## Extending after bootstrap
-
-Bootstrap delivers Tier 1 observability (latency, error rate, token totals) for free. Tool / model / session / turn panels stay empty until the agent emits the matching `gen_ai.*` fields — empty panels are intentional TODO markers.
-
-Read in this order:
-
-1. [`references/instrumentation_contract.md`](references/instrumentation_contract.md) — three field tiers, what each one unlocks
-2. [`references/post_bootstrap_playbook.md`](references/post_bootstrap_playbook.md) — Level 0/1/2/3 self-extension checklist (Level 0 = run verify)
-3. [`references/credentials_playbook.md`](references/credentials_playbook.md) — what to do when bootstrap left credentials on disk
 
 ## Requirements
 
-- Python 3.10+ (skill itself uses stdlib only)
-- Elasticsearch 9.x + Kibana 9.x (Basic license is enough)
-- `otelcol-contrib` 0.87.0+ if running the Collector path
-- For the generated Python instrument snippet: install `opentelemetry-sdk` + `opentelemetry-exporter-otlp-proto-grpc` in the target agent project. Node/TS, Go, Java agents wire their own OTel SDK; the rest of the pipeline stays the same.
-
-## Installation as a skill
-
-For agent runtimes that load skills from a directory:
-
-```bash
-git clone https://github.com/kevin0x5/elasticsearch-agent-observability.git <skill-dir>/elasticsearch-agent-observability
-```
-
-If `<skill-dir>` is itself inside a git-tracked workspace, the nested `.git/` triggers an "embedded git repo" warning. Three escapes: clone with `--depth 1` and add the path to your outer `.gitignore`; install **outside** your workspace and reference the absolute path in your skill config; or add it as a `git submodule`.
+- Python 3.10+ (stdlib only)
+- Elasticsearch 8.x / 9.x + Kibana (Basic license)
+- `otelcol-contrib` 0.87.0+ for the Collector path
+- Any OTel GenAI instrumentation SDK (OpenLLMetry recommended)
 
 ## References
 
-- [`references/config_guide.md`](references/config_guide.md) — operational rules: Collector binary policy, env vs inline credentials, dry-run, exporter triage, verify rule, startup/stop/rollback shape
 - [`references/instrumentation_contract.md`](references/instrumentation_contract.md) — field tiers
-- [`references/post_bootstrap_playbook.md`](references/post_bootstrap_playbook.md) — self-extension checklist
-- [`references/credentials_playbook.md`](references/credentials_playbook.md) — production credential discipline
 - [`references/telemetry_schema.md`](references/telemetry_schema.md) — full field dictionary
-- [`references/architecture.md`](references/architecture.md), [`references/reporting.md`](references/reporting.md), [`references/runtime_compat.md`](references/runtime_compat.md)
-
-## Security
-
-- Credentials default to env placeholders; `--embed-es-credentials` puts them on disk and the file should be treated as secret material.
-- The ingest pipeline redacts sensitive generative AI fields.
-- Rotation, least-privilege API keys, and post-bootstrap cleanup live in [`references/credentials_playbook.md`](references/credentials_playbook.md).
-- See `SECURITY.md` for vulnerability reporting.
-
-## Development
-
-```bash
-python3 -m unittest discover -s tests
-```
-
-## Contributing
-
-See `CONTRIBUTING.md`.
+- [`references/post_bootstrap_playbook.md`](references/post_bootstrap_playbook.md) — post-bootstrap checklist
+- [`references/config_guide.md`](references/config_guide.md) — operational contract
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+Apache-2.0

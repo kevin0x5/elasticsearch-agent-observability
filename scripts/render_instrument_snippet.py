@@ -116,8 +116,8 @@ def traced_tool_call(tool_name: str):
             with tracer.start_as_current_span(
                 f"tool.{tool_name}",
                 attributes={
-                    "gen_ai.agent.tool_name": tool_name,
-                    "gen_ai.agent.signal_type": "tool_call",
+                    "gen_ai.tool.name": tool_name,
+                    "gen_ai.operation.name": "tool_call",
                 },
             ) as span:
                 try:
@@ -126,7 +126,7 @@ def traced_tool_call(tool_name: str):
                     return result
                 except Exception as exc:
                     span.set_attribute("event.outcome", "failure")
-                    span.set_attribute("gen_ai.agent.error_type", type(exc).__name__)
+                    span.set_attribute("error.type", type(exc).__name__)
                     span.record_exception(exc)
                     raise
         wrapper.__name__ = func.__name__
@@ -147,8 +147,8 @@ def traced_model_call(model_name: str):
             with tracer.start_as_current_span(
                 f"model.{model_name}",
                 attributes={
-                    "gen_ai.agent.model_name": model_name,
-                    "gen_ai.agent.signal_type": "model_call",
+                    "gen_ai.request.model": model_name,
+                    "gen_ai.operation.name": "model_call",
                 },
             ) as span:
                 try:
@@ -166,7 +166,7 @@ def traced_model_call(model_name: str):
                     return result
                 except Exception as exc:
                     span.set_attribute("event.outcome", "failure")
-                    span.set_attribute("gen_ai.agent.error_type", type(exc).__name__)
+                    span.set_attribute("error.type", type(exc).__name__)
                     span.record_exception(exc)
                     raise
         wrapper.__name__ = func.__name__
@@ -207,8 +207,7 @@ def _auto_patch():
                     attributes={
                         "gen_ai.system": "openai",
                         "gen_ai.request.model": model,
-                        "gen_ai.agent.model_name": model,
-                        "gen_ai.agent.signal_type": "model_call",
+                        "gen_ai.operation.name": "chat",
                     },
                 ) as span:
                     _t0 = _time.monotonic()
@@ -223,11 +222,11 @@ def _auto_patch():
                         return result
                     except Exception as exc:
                         span.set_attribute("event.outcome", "failure")
-                        span.set_attribute("gen_ai.agent.error_type", type(exc).__name__)
+                        span.set_attribute("error.type", type(exc).__name__)
                         span.record_exception(exc)
                         raise
                     finally:
-                        span.set_attribute("gen_ai.agent.latency_ms", (_time.monotonic() - _t0) * 1000)
+                        span.set_attribute("gen_ai.agent_ext.latency_ms", (_time.monotonic() - _t0) * 1000)
             _OrigChatCompletions.create = _patched_openai_create
     except (ImportError, AttributeError):
         pass
@@ -245,8 +244,7 @@ def _auto_patch():
                     attributes={
                         "gen_ai.system": "anthropic",
                         "gen_ai.request.model": model,
-                        "gen_ai.agent.model_name": model,
-                        "gen_ai.agent.signal_type": "model_call",
+                        "gen_ai.operation.name": "chat",
                     },
                 ) as span:
                     _t0 = _time.monotonic()
@@ -261,11 +259,11 @@ def _auto_patch():
                         return result
                     except Exception as exc:
                         span.set_attribute("event.outcome", "failure")
-                        span.set_attribute("gen_ai.agent.error_type", type(exc).__name__)
+                        span.set_attribute("error.type", type(exc).__name__)
                         span.record_exception(exc)
                         raise
                     finally:
-                        span.set_attribute("gen_ai.agent.latency_ms", (_time.monotonic() - _t0) * 1000)
+                        span.set_attribute("gen_ai.agent_ext.latency_ms", (_time.monotonic() - _t0) * 1000)
             _OrigMessages.create = _patched_anthropic_create
     except (ImportError, AttributeError):
         pass
@@ -347,8 +345,8 @@ const tracer = trace.getTracer('agent-observability');
 export async function tracedToolCall(toolName, fn, attrs = {{}}) {{
   return tracer.startActiveSpan(`tool.${{toolName}}`, {{
     attributes: {{
-      'gen_ai.agent.tool_name': toolName,
-      'gen_ai.agent.signal_type': 'tool_call',
+      'gen_ai.tool.name': toolName,
+      'gen_ai.operation.name': 'tool_call',
       ...attrs,
     }},
   }}, async (span) => {{
@@ -358,7 +356,7 @@ export async function tracedToolCall(toolName, fn, attrs = {{}}) {{
       return result;
     }} catch (err) {{
       span.setAttribute('event.outcome', 'failure');
-      span.setAttribute('gen_ai.agent.error_type', err?.name || 'Error');
+      span.setAttribute('error.type', err?.name || 'Error');
       span.recordException(err);
       span.setStatus({{ code: SpanStatusCode.ERROR, message: String(err) }});
       throw err;
@@ -371,8 +369,8 @@ export async function tracedToolCall(toolName, fn, attrs = {{}}) {{
 export async function tracedModelCall(modelName, fn, attrs = {{}}) {{
   return tracer.startActiveSpan(`model.${{modelName}}`, {{
     attributes: {{
-      'gen_ai.agent.model_name': modelName,
-      'gen_ai.agent.signal_type': 'model_call',
+      'gen_ai.request.model': modelName,
+      'gen_ai.operation.name': 'chat',
       ...attrs,
     }},
   }}, async (span) => {{
@@ -395,13 +393,13 @@ export async function tracedModelCall(modelName, fn, attrs = {{}}) {{
       return result;
     }} catch (err) {{
       span.setAttribute('event.outcome', 'failure');
-      span.setAttribute('gen_ai.agent.error_type', err?.name || 'Error');
+      span.setAttribute('error.type', err?.name || 'Error');
       span.recordException(err);
       span.setStatus({{ code: SpanStatusCode.ERROR, message: String(err) }});
       throw err;
     }} finally {{
       span.setAttribute(
-        'gen_ai.agent.latency_ms',
+        'gen_ai.agent_ext.latency_ms',
         Number((process.hrtime.bigint() - t0) / 1000000n),
       );
       span.end();

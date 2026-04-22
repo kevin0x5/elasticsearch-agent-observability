@@ -107,8 +107,8 @@ def _build_canary_log(*, service_name: str, canary_id: str) -> dict[str, Any]:
                                     {"key": "event.kind", "value": {"stringValue": "event"}},
                                     {"key": "event.outcome", "value": {"stringValue": "success"}},
                                     {"key": "event.dataset", "value": {"stringValue": CANARY_DATASET}},
-                                    {"key": "gen_ai.agent.signal_type", "value": {"stringValue": CANARY_SIGNAL_TYPE}},
-                                    {"key": "gen_ai.agent.verify_id", "value": {"stringValue": canary_id}},
+                                    {"key": "gen_ai.operation.name", "value": {"stringValue": CANARY_SIGNAL_TYPE}},
+                                    {"key": "gen_ai.agent_ext.verify_id", "value": {"stringValue": canary_id}},
                                 ],
                             }
                         ],
@@ -153,7 +153,7 @@ def _poll_elasticsearch(
     index_glob = f"{ds_name}*,{index_prefix}-*"
     query = {
         "size": 1,
-        "query": {"term": {"gen_ai.agent.verify_id": canary_id}},
+        "query": {"term": {"gen_ai.agent_ext.verify_id": canary_id}},
         "sort": [{"@timestamp": {"order": "desc"}}],
     }
     wait = backoff

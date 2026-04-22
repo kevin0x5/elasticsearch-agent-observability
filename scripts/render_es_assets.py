@@ -28,18 +28,18 @@ from common import (
 
 DEFAULT_KIBANA_COLUMNS = [
     "@timestamp",
-    "gen_ai.agent.session_id",
-    "gen_ai.agent.run_id",
-    "gen_ai.agent.turn_id",
-    "gen_ai.agent.component_type",
+    "gen_ai.conversation.id",
+    "gen_ai.agent.id",
+    "gen_ai.agent_ext.turn_id",
+    "gen_ai.agent_ext.component_type",
     "event.action",
     "service.name",
-    "gen_ai.agent.tool_name",
-    "gen_ai.agent.model_name",
-    "gen_ai.agent.mcp_method_name",
-    "gen_ai.agent.latency_ms",
+    "gen_ai.tool.name",
+    "gen_ai.request.model",
+    "gen_ai.operation.name",
+    "gen_ai.agent_ext.latency_ms",
     "event.outcome",
-    "gen_ai.agent.error_type",
+    "error.type",
 ]
 
 
@@ -94,35 +94,37 @@ def _ecs_base_properties() -> dict[str, Any]:
         # --- labels ---
         "labels.recommended_modules": {"type": "keyword"},
         "labels.ingest_mode": {"type": "keyword"},
-        # --- gen_ai (OpenTelemetry GenAI Semantic Conventions) ---
+        # --- gen_ai (OpenTelemetry GenAI Semantic Conventions v1.40+) ---
         "gen_ai.system": {"type": "keyword"},
         "gen_ai.request.model": {"type": "keyword"},
         "gen_ai.response.model": {"type": "keyword"},
+        "gen_ai.operation.name": {"type": "keyword"},
         "gen_ai.usage.input_tokens": {"type": "long"},
         "gen_ai.usage.output_tokens": {"type": "long"},
         "gen_ai.usage.total_tokens": {"type": "long"},
-        # --- agent-observability custom (under gen_ai.agent.*) ---
-        "gen_ai.agent.run_id": {"type": "keyword"},
-        "gen_ai.agent.turn_id": {"type": "keyword"},
-        "gen_ai.agent.session_id": {"type": "keyword"},
-        "gen_ai.agent.tool_name": {"type": "keyword"},
-        "gen_ai.agent.model_name": {"type": "keyword"},
-        "gen_ai.agent.mcp_method_name": {"type": "keyword"},
-        "gen_ai.agent.module": {"type": "keyword"},
-        "gen_ai.agent.module_kind": {"type": "keyword"},
-        "gen_ai.agent.signal_type": {"type": "keyword"},
-        "gen_ai.agent.semantic_kind": {"type": "keyword"},
-        "gen_ai.agent.error_type": {"type": "keyword"},
-        "gen_ai.agent.retry_count": {"type": "integer"},
-        "gen_ai.agent.latency_ms": {"type": "float"},
-        "gen_ai.agent.cost": {"type": "double"},
-        # --- component-level observability (aligns with AgentKit component monitoring) ---
-        "gen_ai.agent.component_type": {"type": "keyword"},  # runtime / tool / llm / mcp / memory / knowledge / guardrail
-        # --- memory / knowledge monitoring ---
-        "gen_ai.agent.retrieval_latency_ms": {"type": "float"},
-        "gen_ai.agent.cache_hit": {"type": "boolean"},
-        "gen_ai.agent.retrieval_score": {"type": "float"},
-        "gen_ai.agent.knowledge_source": {"type": "keyword"},
+        # --- gen_ai OTel standard: agent + tool + conversation ---
+        "gen_ai.agent.id": {"type": "keyword"},
+        "gen_ai.agent.name": {"type": "keyword"},
+        "gen_ai.agent.version": {"type": "keyword"},
+        "gen_ai.conversation.id": {"type": "keyword"},
+        "gen_ai.tool.name": {"type": "keyword"},
+        "gen_ai.tool.call.id": {"type": "keyword"},
+        "error.type": {"type": "keyword"},
+        # --- agent_ext: project extensions awaiting OTel SemConv proposal ---
+        "gen_ai.agent_ext.turn_id": {"type": "keyword"},
+        "gen_ai.agent_ext.component_type": {"type": "keyword"},  # runtime / tool / llm / mcp / memory / knowledge / guardrail
+        "gen_ai.agent_ext.retry_count": {"type": "integer"},
+        "gen_ai.agent_ext.latency_ms": {"type": "float"},
+        "gen_ai.agent_ext.cost": {"type": "double"},
+        "gen_ai.agent_ext.module": {"type": "keyword"},
+        "gen_ai.agent_ext.module_kind": {"type": "keyword"},
+        "gen_ai.agent_ext.semantic_kind": {"type": "keyword"},
+        "gen_ai.agent_ext.verify_id": {"type": "keyword"},
+        # --- memory / knowledge monitoring (agent_ext) ---
+        "gen_ai.agent_ext.retrieval_latency_ms": {"type": "float"},
+        "gen_ai.agent_ext.cache_hit": {"type": "boolean"},
+        "gen_ai.agent_ext.retrieval_score": {"type": "float"},
+        "gen_ai.agent_ext.knowledge_source": {"type": "keyword"},
         # --- guardrail / safety monitoring ---
         "gen_ai.guardrail.action": {"type": "keyword"},  # pass / block / redact
         "gen_ai.guardrail.rule_id": {"type": "keyword"},
@@ -213,11 +215,11 @@ def build_ingest_pipeline(modules: list[str]) -> dict[str, Any]:
             # --- ECS event defaults ---
             {"set": {"field": "event.kind", "value": "event", "override": False}},
             {"set": {"field": "event.category", "value": "process", "override": False}},
-            # --- compute event.duration from ECS-native latency_ms if present ---
+            # --- compute event.duration from latency_ms if present ---
             {
                 "script": {
                     "lang": "painless",
-                    "source": "if (ctx.gen_ai?.agent?.latency_ms != null && ctx.event?.duration == null) { ctx.event = ctx.event ?: new HashMap(); ctx.event.duration = (long)(ctx.gen_ai.agent.latency_ms * 1000000L); }",
+                    "source": "if (ctx.gen_ai?.agent_ext?.latency_ms != null && ctx.event?.duration == null) { ctx.event = ctx.event ?: new HashMap(); ctx.event.duration = (long)(ctx.gen_ai.agent_ext.latency_ms * 1000000L); }",
                     "ignore_failure": True,
                 }
             },
@@ -225,7 +227,7 @@ def build_ingest_pipeline(modules: list[str]) -> dict[str, Any]:
             {
                 "script": {
                     "lang": "painless",
-                    "source": "if (ctx.event?.outcome == null) { ctx.event = ctx.event ?: new HashMap(); ctx.event.outcome = (ctx.gen_ai?.agent?.error_type != null) ? 'failure' : 'success'; }",
+                    "source": "if (ctx.event?.outcome == null) { ctx.event = ctx.event ?: new HashMap(); ctx.event.outcome = (ctx.error?.type != null) ? 'failure' : 'success'; }",
                     "ignore_failure": True,
                 }
             },
@@ -475,7 +477,7 @@ def _build_lens_top_tools(*, object_id: str, data_view_id: str) -> dict[str, Any
         data_view_id=data_view_id,
         title="Top tools by call count",
         description="Pie chart of most-called agent tools.",
-        source_field="gen_ai.agent.tool_name",
+        source_field="gen_ai.tool.name",
         metric_label="Calls",
     )
 
@@ -486,8 +488,8 @@ def _build_lens_top_sessions(*, object_id: str, data_view_id: str) -> dict[str, 
         object_id=object_id,
         data_view_id=data_view_id,
         title="Top sessions by event volume",
-        description="Most active gen_ai.agent.session_id values in the selected time window.",
-        source_field="gen_ai.agent.session_id",
+        description="Most active gen_ai.conversation.id values in the selected time window.",
+        source_field="gen_ai.conversation.id",
         metric_label="Events",
     )
 
@@ -499,9 +501,9 @@ def _build_lens_failed_sessions(*, object_id: str, data_view_id: str) -> dict[st
         data_view_id=data_view_id,
         title="Failed sessions",
         description="Failure-heavy sessions for fast conversation-level drilldown.",
-        source_field="gen_ai.agent.session_id",
+        source_field="gen_ai.conversation.id",
         metric_label="Failures",
-        query="event.outcome: failure and gen_ai.agent.session_id:*",
+        query="event.outcome: failure and gen_ai.conversation.id:*",
     )
 
 
@@ -512,9 +514,9 @@ def _build_lens_component_failures(*, object_id: str, data_view_id: str) -> dict
         data_view_id=data_view_id,
         title="Failure hotspots by component",
         description="Which component types are producing the most failed events.",
-        source_field="gen_ai.agent.component_type",
+        source_field="gen_ai.agent_ext.component_type",
         metric_label="Failures",
-        query="event.outcome: failure and gen_ai.agent.component_type:*",
+        query="event.outcome: failure and gen_ai.agent_ext.component_type:*",
     )
 
 
@@ -631,7 +633,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
             description="Conversation-first Discover entry with session, run, turn, and component context.",
             data_view_id=data_view_id,
             columns=DEFAULT_KIBANA_COLUMNS,
-            query="gen_ai.agent.session_id:* or gen_ai.agent.turn_id:* or gen_ai.agent.run_id:*",
+            query="gen_ai.conversation.id:* or gen_ai.agent_ext.turn_id:* or gen_ai.agent.id:*",
         ),
         _build_lens_event_rate_visualization(object_id=lens_event_rate_id, data_view_id=data_view_id),
         _build_lens_latency_percentiles(object_id=lens_latency_id, data_view_id=data_view_id),
@@ -643,8 +645,8 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
             object_id=lens_component_type_id,
             data_view_id=data_view_id,
             title="Events by component type",
-            description="Breakdown by gen_ai.agent.component_type (runtime / tool / llm / mcp / memory / knowledge / guardrail).",
-            source_field="gen_ai.agent.component_type",
+            description="Breakdown by gen_ai.agent_ext.component_type (runtime / tool / llm / mcp / memory / knowledge / guardrail).",
+            source_field="gen_ai.agent_ext.component_type",
             metric_label="Events",
         ),
         _build_lens_component_failures(object_id=lens_component_failures_id, data_view_id=data_view_id),
@@ -667,7 +669,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
     extra_lens_ids: list[str] = []
     for ext in (extensions or []):
         ext_id = f"{index_prefix}-lens-{ext.get('id', 'custom')}"
-        source_field = ext.get("field", "gen_ai.agent.tool_name")
+        source_field = ext.get("field", "gen_ai.tool.name")
         agg_type = ext.get("aggregation", "terms")
         viz_type = ext.get("visualization", "lnsPie")
         title = ext.get("title", f"Custom: {source_field}")

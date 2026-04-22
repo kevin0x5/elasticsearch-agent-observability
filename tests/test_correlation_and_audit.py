@@ -153,7 +153,7 @@ class SkillAuditTests(unittest.TestCase):
         doc = captured["payload"]
         # Must carry internal.* dataset so aggregations filter it out.
         self.assertEqual(doc["event.dataset"], common.SKILL_AUDIT_DATASET)
-        self.assertEqual(doc["gen_ai.agent.tool_name"], "doctor")
+        self.assertEqual(doc["gen_ai.tool.name"], "doctor")
         self.assertEqual(doc["skill.verdict"], "healthy")
         self.assertEqual(doc["skill.duration_ms"], 42)
         self.assertEqual(doc["skill.evidence"], {"healthz": "pass", "canary": "pass"})

@@ -1,15 +1,15 @@
 ---
 name: elasticsearch-agent-observability
-description: "Use this skill when a user wants to bootstrap agent observability on Elasticsearch, OpenTelemetry, and Kibana. Inspect the workspace, render Collector and Elasticsearch assets, prepare a Kibana entry surface, and optionally dry-run or apply those assets as a working starter setup."
+description: "Use this skill when a user wants to set up Elasticsearch as the backend for OpenLLMetry or any OTel GenAI instrumentation. Renders ES index templates, ingest pipelines, ILM, Kibana dashboards, and RCA alerting — all aligned to OTel GenAI Semantic Conventions."
 ---
 
 # Elasticsearch Agent Observability
 
 ## Purpose
 
-Bootstrap a practical **Elastic-side starter surface** for an agent.
+**OpenLLMetry → Elasticsearch adapter.** Bootstrap ES storage, Kibana dashboards, and RCA alerting for GenAI agent telemetry collected via OpenLLMetry or any OTel-based instrumentation.
 
-Treat this skill as a builder for the base layer:
+Treat this skill as a builder for the ES backend layer:
 
 - inspect the workspace
 - render artifacts

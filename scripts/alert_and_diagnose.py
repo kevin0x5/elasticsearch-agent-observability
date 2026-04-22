@@ -119,30 +119,30 @@ def _query_current_window(config: ESConfig, ds_name: str, time_range: str) -> di
             "p95_latency": {"percentiles": {"field": "event.duration", "percents": [95]}},
             "token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}},
             "token_output_sum": {"sum": {"field": "gen_ai.usage.output_tokens"}},
-            "retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}},
-            "top_error_types": {"terms": {"field": "gen_ai.agent.error_type", "size": TERM_BUCKET_SIZE}},
+            "retry_sum": {"sum": {"field": "gen_ai.agent_ext.retry_count"}},
+            "top_error_types": {"terms": {"field": "error.type", "size": TERM_BUCKET_SIZE}},
             "top_error_tools": {
                 "filter": {"term": {"event.outcome": "failure"}},
-                "aggs": {"tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE}}},
+                "aggs": {"tools": {"terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE}}},
             },
             "top_error_models": {
                 "filter": {"term": {"event.outcome": "failure"}},
-                "aggs": {"models": {"terms": {"field": "gen_ai.agent.model_name", "size": TERM_BUCKET_SIZE}}},
+                "aggs": {"models": {"terms": {"field": "gen_ai.request.model", "size": TERM_BUCKET_SIZE}}},
             },
             "top_failure_sessions": {
                 "filter": {"term": {"event.outcome": "failure"}},
-                "aggs": {"sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE}}},
+                "aggs": {"sessions": {"terms": {"field": "gen_ai.conversation.id", "size": TERM_BUCKET_SIZE}}},
             },
             "top_failure_components": {
                 "filter": {"term": {"event.outcome": "failure"}},
-                "aggs": {"components": {"terms": {"field": "gen_ai.agent.component_type", "size": TERM_BUCKET_SIZE}}},
+                "aggs": {"components": {"terms": {"field": "gen_ai.agent_ext.component_type", "size": TERM_BUCKET_SIZE}}},
             },
             "top_token_tools": {
-                "terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
+                "terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
                 "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}},
             },
             "top_token_models": {
-                "terms": {"field": "gen_ai.agent.model_name", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
+                "terms": {"field": "gen_ai.request.model", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
                 "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}},
             },
             # Session ordered by token consumption, used by the token-anomaly
@@ -150,27 +150,27 @@ def _query_current_window(config: ESConfig, ds_name: str, time_range: str) -> di
             # top_retry_sessions here, which put a retry-heavy (but possibly
             # cheap) session in a conclusion that claimed to be about tokens.
             "top_token_sessions": {
-                "terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
+                "terms": {"field": "gen_ai.conversation.id", "size": TERM_BUCKET_SIZE, "order": {"token_sum": "desc"}},
                 "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}},
             },
             "top_latency_tools": {
-                "terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE, "order": {"p95": "desc"}},
+                "terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE, "order": {"p95": "desc"}},
                 "aggs": {"p95": {"percentiles": {"field": "event.duration", "percents": [95]}}},
             },
             "top_retry_sessions": {
-                "terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE, "order": {"retry_sum": "desc"}},
-                "aggs": {"retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}}},
+                "terms": {"field": "gen_ai.conversation.id", "size": TERM_BUCKET_SIZE, "order": {"retry_sum": "desc"}},
+                "aggs": {"retry_sum": {"sum": {"field": "gen_ai.agent_ext.retry_count"}}},
             },
             "top_retry_tools": {
-                "terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE, "order": {"retry_sum": "desc"}},
-                "aggs": {"retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}}},
+                "terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE, "order": {"retry_sum": "desc"}},
+                "aggs": {"retry_sum": {"sum": {"field": "gen_ai.agent_ext.retry_count"}}},
             },
             "top_turns_by_latency": {
-                "terms": {"field": "gen_ai.agent.turn_id", "size": TERM_BUCKET_SIZE, "order": {"avg_latency": "desc"}},
+                "terms": {"field": "gen_ai.agent_ext.turn_id", "size": TERM_BUCKET_SIZE, "order": {"avg_latency": "desc"}},
                 "aggs": {
-                    "avg_latency": {"avg": {"field": "gen_ai.agent.latency_ms"}},
-                    "sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": 1}},
-                    "components": {"terms": {"field": "gen_ai.agent.component_type", "size": 1}},
+                    "avg_latency": {"avg": {"field": "gen_ai.agent_ext.latency_ms"}},
+                    "sessions": {"terms": {"field": "gen_ai.conversation.id", "size": 1}},
+                    "components": {"terms": {"field": "gen_ai.agent_ext.component_type", "size": 1}},
                     "failure_count": {"filter": {"term": {"event.outcome": "failure"}}},
                 },
             },
@@ -205,7 +205,7 @@ def _query_baseline_window(config: ESConfig, ds_name: str, baseline_range: str) 
             "p95_latency": {"percentiles": {"field": "event.duration", "percents": [95]}},
             "token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}},
             "token_output_sum": {"sum": {"field": "gen_ai.usage.output_tokens"}},
-            "retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}},
+            "retry_sum": {"sum": {"field": "gen_ai.agent_ext.retry_count"}},
         },
     }
     return es_request(config, "POST", f"/{ds_name}*/_search", payload)
@@ -705,7 +705,7 @@ def _write_alert_to_es(config: ESConfig, index_prefix: str, result: dict[str, An
             "event.action": alert["alert_type"],
             "event.outcome": "failure",
             "service.name": "alert-and-diagnose",
-            "gen_ai.agent.signal_type": "alert_check",
+            "gen_ai.operation.name": "alert_check",
             "alert.severity": alert["severity"],
             "alert.phenomenon": alert["phenomenon"],
             "alert.root_cause": alert["root_cause"],
@@ -713,11 +713,11 @@ def _write_alert_to_es(config: ESConfig, index_prefix: str, result: dict[str, An
             "message": f"[{alert['severity'].upper()}] {alert['alert_type']}: {alert['phenomenon']}",
         }
         if top_sessions:
-            doc["gen_ai.agent.session_id"] = top_sessions[0].get("key")
+            doc["gen_ai.conversation.id"] = top_sessions[0].get("key")
         if top_turns:
-            doc["gen_ai.agent.turn_id"] = top_turns[0].get("key")
+            doc["gen_ai.agent_ext.turn_id"] = top_turns[0].get("key")
         if top_components:
-            doc["gen_ai.agent.component_type"] = top_components[0].get("key")
+            doc["gen_ai.agent_ext.component_type"] = top_components[0].get("key")
         _write(doc)
 
     if not alerts:
@@ -729,7 +729,7 @@ def _write_alert_to_es(config: ESConfig, index_prefix: str, result: dict[str, An
                 "event.action": "alert_check_ok",
                 "event.outcome": "success",
                 "service.name": "alert-and-diagnose",
-                "gen_ai.agent.signal_type": "alert_check",
+                "gen_ai.operation.name": "alert_check",
                 "message": "No alerts triggered",
             }
         )

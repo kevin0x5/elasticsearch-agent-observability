@@ -49,49 +49,49 @@ def search_payload(time_range: str, time_field: str = "@timestamp") -> dict[str,
         },
         "aggs": {
             "with_errors": {"filter": {"term": {"event.outcome": "failure"}}},
-            "tool_calls": {"filter": {"exists": {"field": "gen_ai.agent.tool_name"}}},
+            "tool_calls": {"filter": {"exists": {"field": "gen_ai.tool.name"}}},
             "tool_errors": {
                 "filter": {
                     "bool": {
-                        "must": [{"exists": {"field": "gen_ai.agent.tool_name"}}, {"term": {"event.outcome": "failure"}}]
+                        "must": [{"exists": {"field": "gen_ai.tool.name"}}, {"term": {"event.outcome": "failure"}}]
                     }
                 }
             },
             "latency_percentiles": {"percentiles": {"field": "event.duration", "percents": [50, 95]}},
-            "retry_sum": {"sum": {"field": "gen_ai.agent.retry_count"}},
+            "retry_sum": {"sum": {"field": "gen_ai.agent_ext.retry_count"}},
             "token_input_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}},
             "token_output_sum": {"sum": {"field": "gen_ai.usage.output_tokens"}},
-            "cost_sum": {"sum": {"field": "gen_ai.agent.cost"}},
-            "top_sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE}},
+            "cost_sum": {"sum": {"field": "gen_ai.agent_ext.cost"}},
+            "top_sessions": {"terms": {"field": "gen_ai.conversation.id", "size": TERM_BUCKET_SIZE}},
             "failed_sessions": {
                 "filter": {"term": {"event.outcome": "failure"}},
                 "aggs": {
-                    "sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": TERM_BUCKET_SIZE}},
+                    "sessions": {"terms": {"field": "gen_ai.conversation.id", "size": TERM_BUCKET_SIZE}},
                 },
             },
             "slow_turns": {
                 "terms": {
-                    "field": "gen_ai.agent.turn_id",
+                    "field": "gen_ai.agent_ext.turn_id",
                     "size": TERM_BUCKET_SIZE,
                     "order": {"avg_latency": "desc"},
                 },
                 "aggs": {
-                    "avg_latency": {"avg": {"field": "gen_ai.agent.latency_ms"}},
-                    "sessions": {"terms": {"field": "gen_ai.agent.session_id", "size": 1}},
+                    "avg_latency": {"avg": {"field": "gen_ai.agent_ext.latency_ms"}},
+                    "sessions": {"terms": {"field": "gen_ai.conversation.id", "size": 1}},
                     "failure_count": {"filter": {"term": {"event.outcome": "failure"}}},
                 },
             },
-            "top_components": {"terms": {"field": "gen_ai.agent.component_type", "size": COMPONENT_BUCKET_SIZE}},
+            "top_components": {"terms": {"field": "gen_ai.agent_ext.component_type", "size": COMPONENT_BUCKET_SIZE}},
             "failed_components": {
                 "filter": {"term": {"event.outcome": "failure"}},
                 "aggs": {
-                    "components": {"terms": {"field": "gen_ai.agent.component_type", "size": COMPONENT_BUCKET_SIZE}},
+                    "components": {"terms": {"field": "gen_ai.agent_ext.component_type", "size": COMPONENT_BUCKET_SIZE}},
                 },
             },
-            "top_tools": {"terms": {"field": "gen_ai.agent.tool_name", "size": TERM_BUCKET_SIZE}},
-            "top_models": {"terms": {"field": "gen_ai.agent.model_name", "size": TERM_BUCKET_SIZE}},
-            "mcp_methods": {"terms": {"field": "gen_ai.agent.mcp_method_name", "size": TERM_BUCKET_SIZE}},
-            "error_types": {"terms": {"field": "gen_ai.agent.error_type", "size": TERM_BUCKET_SIZE}},
+            "top_tools": {"terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE}},
+            "top_models": {"terms": {"field": "gen_ai.request.model", "size": TERM_BUCKET_SIZE}},
+            "mcp_methods": {"terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE}},
+            "error_types": {"terms": {"field": "error.type", "size": TERM_BUCKET_SIZE}},
         },
     }
 

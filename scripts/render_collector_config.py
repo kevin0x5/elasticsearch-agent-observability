@@ -23,8 +23,8 @@ DEFAULT_ES_USER_ENV = "ELASTICSEARCH_USERNAME"
 DEFAULT_ES_PASSWORD_ENV = "ELASTICSEARCH_PASSWORD"
 DEFAULT_SPANMETRICS_DIMENSIONS = (
     "service.name",
-    "gen_ai.agent.tool_name",
-    "gen_ai.agent.model_name",
+    "gen_ai.tool.name",
+    "gen_ai.request.model",
     "event.outcome",
 )
 

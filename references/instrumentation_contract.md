@@ -35,12 +35,11 @@ The agent has to wrap its own call sites. The Python or Node instrumentation bun
 
 | Field | Where to set | Powers |
 |---|---|---|
-| `gen_ai.agent.tool_name` | every tool-call span | tool-level latency/error panels, `error_rate_spike` root cause |
-| `gen_ai.agent.model_name` | every model-call span | per-model token breakdown, `token_consumption_anomaly` root cause |
-| `gen_ai.agent.session_id` | span context propagated through a user session | `session_failure_hotspot` alert, session drill-down |
-| `gen_ai.agent.turn_id` | span context per conversation turn | `long_turn_hotspot` alert, turn-level diffing |
-| `gen_ai.agent.component_type` | one of `tool` / `llm` / `mcp` / `memory` / `knowledge` / `guardrail` / `runtime` | per-component dashboards; filters in every alert |
-| `gen_ai.agent.signal_type` | `tool_call` / `model_call` / `retrieval` / `guardrail_check` | logical type faceting (separate from component tier) |
+| `gen_ai.tool.name` | every tool-call span | tool-level latency/error panels, `error_rate_spike` root cause |
+| `gen_ai.conversation.id` | span context propagated through a user session | `session_failure_hotspot` alert, session drill-down |
+| `gen_ai.agent_ext.turn_id` | span context per conversation turn | `long_turn_hotspot` alert, turn-level diffing |
+| `gen_ai.agent_ext.component_type` | one of `tool` / `llm` / `mcp` / `memory` / `knowledge` / `guardrail` / `runtime` | per-component dashboards; filters in every alert |
+| `gen_ai.operation.name` | `tool_call` / `chat` / `retrieval` / `guardrail_check` | logical type faceting (separate from component tier) |
 
 **Minimum signals on the dashboard after Tier 2**: everything above _plus_ tool mix, model mix, per-session view, per-turn view, retry-storm detection.
 
@@ -48,19 +47,18 @@ The agent has to wrap its own call sites. The Python or Node instrumentation bun
 
 | Field | Powers |
 |---|---|
-| `gen_ai.agent.retry_count` | `retry_storm` alert |
-| `gen_ai.agent.error_type` | RCA phrasing ("timeout" vs "application-level"); tightens `error_rate_spike` recommendations |
-| `gen_ai.agent.latency_ms` | explicit turn latency for `long_turn_hotspot` |
-| `gen_ai.agent.cost` | cost panels in the dashboard |
+| `gen_ai.agent_ext.retry_count` | `retry_storm` alert |
+| `error.type` | RCA phrasing ("timeout" vs "application-level"); tightens `error_rate_spike` recommendations |
+| `gen_ai.agent_ext.latency_ms` | explicit turn latency for `long_turn_hotspot` |
+| `gen_ai.agent_ext.cost` | cost panels in the dashboard |
 | `gen_ai.guardrail.*` | safety dashboards (see `telemetry_schema.md`) |
 | `gen_ai.evaluation.*` | regression dashboards (see `telemetry_schema.md`) |
 
 ## Rules
 
 1. **Don't invent field names.** If a field isn't listed here or in `telemetry_schema.md`, the dashboard doesn't consume it, and adding it silently doesn't help. Propose it via a PR that also updates a panel.
-2. **Don't fake Tier 2.** Writing `gen_ai.agent.tool_name = "unknown"` for every span defeats the dashboard. Leave the field unset if you don't know it.
-3. **`gen_ai.request.model` and `gen_ai.agent.model_name` mean the same thing on purpose.** The proxy sets the former, the SDK wrapper sets the latter. Both are queried by the dashboard's model panels via a `should` clause.
-4. **Internal events are tagged with `event.dataset`.** `internal.sanity_check` and `internal.alert_check` are filtered out of every baseline query so they never skew rates. If you emit your own internal events, follow the same convention.
+2. **Don't fake Tier 2.** Writing `gen_ai.tool.name = "unknown"` for every span defeats the dashboard. Leave the field unset if you don't know it.
+3. **Internal events are tagged with `event.dataset`.** `internal.sanity_check` and `internal.alert_check` are filtered out of every baseline query so they never skew rates. If you emit your own internal events, follow the same convention.
 
 ## Reading order for an agent doing self-extension
 

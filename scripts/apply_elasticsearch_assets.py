@@ -53,8 +53,8 @@ def sanity_check(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
         "event.outcome": "success",
         "event.dataset": "internal.sanity_check",
         "service.name": "sanity-check",
-        "gen_ai.agent.tool_name": "_sanity_check_tool",
-        "gen_ai.agent.signal_type": "sanity_check",
+        "gen_ai.tool.name": "_sanity_check_tool",
+        "gen_ai.operation.name": "sanity_check",
         "message": "End-to-end sanity check document",
     }
     doc_id = ""

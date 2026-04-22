@@ -44,7 +44,7 @@ class VerifyPipelineTests(unittest.TestCase):
         def fake_es_request(config, method, path, payload=None):
             # The verify script queries `/<glob>/_search` — capture canary id from query.
             term = payload["query"]["term"]
-            canary_id = term["gen_ai.agent.verify_id"]
+            canary_id = term["gen_ai.agent_ext.verify_id"]
             captured["canary_id"] = canary_id
             return {
                 "hits": {
@@ -55,7 +55,7 @@ class VerifyPipelineTests(unittest.TestCase):
                             "_source": {
                                 "event.dataset": verify_pipeline.CANARY_DATASET,
                                 "service.name": "pipeline-verify",
-                                "gen_ai.agent.verify_id": canary_id,
+                                "gen_ai.agent_ext.verify_id": canary_id,
                             },
                         }
                     ]
@@ -122,7 +122,7 @@ class VerifyPipelineTests(unittest.TestCase):
             return {"ok": True, "status_code": 200, "url": endpoint + "/v1/logs"}
 
         def fake_es_request(config, method, path, payload=None):
-            canary_id = payload["query"]["term"]["gen_ai.agent.verify_id"]
+            canary_id = payload["query"]["term"]["gen_ai.agent_ext.verify_id"]
             return {
                 "hits": {
                     "hits": [
@@ -131,7 +131,7 @@ class VerifyPipelineTests(unittest.TestCase):
                             "_id": "doc-x",
                             "_source": {
                                 # Intentionally missing event.dataset and service.name
-                                "gen_ai.agent.verify_id": canary_id,
+                                "gen_ai.agent_ext.verify_id": canary_id,
                             },
                         }
                     ]

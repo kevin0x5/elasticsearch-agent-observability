@@ -31,11 +31,11 @@ Recommended first-install posture: **point the agent at the OTLP HTTP bridge fir
 
 Goal: fill the empty tool/model/session/turn panels.
 
-- [ ] Wrap every **tool call** site with `tracedToolCall("<tool_name>", ...)` or manual span + `gen_ai.agent.tool_name`.
-- [ ] Wrap every **model call** site with `tracedModelCall("<model_name>", ...)` or set `gen_ai.agent.model_name` + token fields.
-- [ ] At the **session boundary** (inbound request / conversation starter), open a span with `gen_ai.agent.session_id`. All child spans inherit it via OTel context.
-- [ ] At each **conversation turn** boundary, open a child span with `gen_ai.agent.turn_id`.
-- [ ] Tag every span with `gen_ai.agent.component_type` (`tool` / `llm` / `mcp` / `memory` / `knowledge` / `guardrail` / `runtime`).
+- [ ] Wrap every **tool call** site with `tracedToolCall("<tool_name>", ...)` or manual span + `gen_ai.tool.name`.
+- [ ] Wrap every **model call** site with `tracedModelCall("<model_name>", ...)` or set `gen_ai.request.model` + token fields.
+- [ ] At the **session boundary** (inbound request / conversation starter), open a span with `gen_ai.conversation.id`. All child spans inherit it via OTel context.
+- [ ] At each **conversation turn** boundary, open a child span with `gen_ai.agent_ext.turn_id`.
+- [ ] Tag every span with `gen_ai.agent_ext.component_type` (`tool` / `llm` / `mcp` / `memory` / `knowledge` / `guardrail` / `runtime`).
 
 Verify: after traffic, the dashboard's "tool mix", "model mix", "sessions", and "slow turns" panels should have data.
 
@@ -43,9 +43,9 @@ Verify: after traffic, the dashboard's "tool mix", "model mix", "sessions", and 
 
 Goal: stop getting generic "HTTP 500" alerts; start seeing "timeout concentrated in tool X".
 
-- [ ] Classify exceptions into `gen_ai.agent.error_type`. Suggested values: `timeout` / `rate_limit` / `api_error` / `auth_error` / `tool_error` / `validation_error` / `unknown`.
-- [ ] At the retry point, set `gen_ai.agent.retry_count` to the running count (not a boolean).
-- [ ] If the agent has a native latency measurement already, also set `gen_ai.agent.latency_ms` (the alert uses it for long-turn detection independent of span duration).
+- [ ] Classify exceptions into `error.type`. Suggested values: `timeout` / `rate_limit` / `api_error` / `auth_error` / `tool_error` / `validation_error` / `unknown`.
+- [ ] At the retry point, set `gen_ai.agent_ext.retry_count` to the running count (not a boolean).
+- [ ] If the agent has a native latency measurement already, also set `gen_ai.agent_ext.latency_ms` (the alert uses it for long-turn detection independent of span duration).
 
 Verify: `alert_and_diagnose.py --time-range now-15m` starts citing specific `error_type` / tool / retry counts in the RCA section.
 
@@ -53,7 +53,7 @@ Verify: `alert_and_diagnose.py --time-range now-15m` starts citing specific `err
 
 Goal: cost panels, safety panels, regression tracking. Only do these when Levels 1 and 2 are solid.
 
-- [ ] `gen_ai.agent.cost` — compute per-call USD cost (needs a model-price table; keep it out of the agent's hot path).
+- [ ] `gen_ai.agent_ext.cost` — compute per-call USD cost (needs a model-price table; keep it out of the agent's hot path).
 - [ ] `gen_ai.guardrail.*` — if the agent has safety filters.
 - [ ] `gen_ai.evaluation.*` — if the agent has an eval harness.
 - [ ] Custom Kibana panels — add them via `--dashboard-extensions` on a follow-up bootstrap; don't hand-edit the generated saved objects.

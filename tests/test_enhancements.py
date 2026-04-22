@@ -187,7 +187,7 @@ class MaturityScoreTests(unittest.TestCase):
 class DashboardExtensionsTests(unittest.TestCase):
     def test_extensions_add_extra_lens_to_kibana_bundle(self) -> None:
         extensions = [
-            {"id": "mcp-methods", "field": "gen_ai.agent.mcp_method_name", "aggregation": "terms", "title": "Top MCP Methods"},
+            {"id": "mcp-methods", "field": "gen_ai.tool.name", "aggregation": "terms", "title": "Top MCP Methods"},
         ]
         bundle = render_es_assets.build_kibana_saved_objects("agent-obsv", extensions=extensions)
         lens_ids = bundle["summary"]["lens_ids"]
@@ -203,7 +203,7 @@ class DashboardExtensionsTests(unittest.TestCase):
 
     def test_lens_objects_omit_kibana_saved_object_meta(self) -> None:
         extensions = [
-            {"id": "mcp-methods", "field": "gen_ai.agent.mcp_method_name", "aggregation": "terms", "title": "Top MCP Methods"},
+            {"id": "mcp-methods", "field": "gen_ai.tool.name", "aggregation": "terms", "title": "Top MCP Methods"},
         ]
         bundle = render_es_assets.build_kibana_saved_objects("agent-obsv", extensions=extensions)
         lens_objects = [obj for obj in bundle["objects"] if obj.get("type") == "lens"]
@@ -212,7 +212,7 @@ class DashboardExtensionsTests(unittest.TestCase):
 
     def test_sum_extension_creates_xy_chart(self) -> None:
         extensions = [
-            {"id": "cost-trend", "field": "gen_ai.agent.cost", "aggregation": "sum", "title": "Cost Over Time"},
+            {"id": "cost-trend", "field": "gen_ai.agent_ext.cost", "aggregation": "sum", "title": "Cost Over Time"},
         ]
         bundle = render_es_assets.build_kibana_saved_objects("agent-obsv", extensions=extensions)
         custom_lens = [obj for obj in bundle["objects"] if obj.get("id") == "agent-obsv-lens-cost-trend"]

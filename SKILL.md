@@ -1,172 +1,123 @@
 ---
 name: elasticsearch-agent-observability
-description: "Use this skill when a user wants to set up Elasticsearch as the backend for OpenLLMetry or any OTel GenAI instrumentation. Renders ES index templates, ingest pipelines, ILM, Kibana dashboards, and RCA alerting — all aligned to OTel GenAI Semantic Conventions."
+description: "Use this skill when a user wants to set up Elasticsearch as the backend for AI agent observability. One bootstrap gives ES storage, Kibana dashboards, RCA alerting, and evaluation — all aligned to OTel GenAI Semantic Conventions."
 ---
 
 # Elasticsearch Agent Observability
 
-## Purpose
+给 AI agent 接 Elasticsearch 可观测。一条命令出全套：索引模板、ILM、ingest pipeline、Kibana 仪表板、告警 + 根因分析。
 
-**OpenLLMetry → Elasticsearch adapter.** Bootstrap ES storage, Kibana dashboards, and RCA alerting for GenAI agent telemetry collected via OpenLLMetry or any OTel-based instrumentation.
-
-Treat this skill as a builder for the ES backend layer:
-
-- inspect the workspace
-- render artifacts
-- preview the apply plan
-- apply assets
-- smoke-check the query path
-
-Do not present it as a full observability platform if the repo only prepares the base layer.
+不是完整可观测平台。只管 ES 后端的 data layer。
 
 ## Trigger Conditions
 
-Trigger for requests like:
-
-- “给这个 agent 建可观测能力”
-- “用 Elasticsearch 给当前 agent 接观测”
-- “帮我生成 OTel / Elasticsearch / Kibana 这一套”
-- “给某个 agent 准备 Collector、索引模板、ILM 和 Kibana 入口”
+- "给这个 agent 建可观测能力"
+- "用 Elasticsearch 给当前 agent 接观测"
 - "add observability to this agent"
-- "set up OpenTelemetry, Elasticsearch, and Kibana for this workspace"
-- "generate the Collector, Elasticsearch, and Kibana assets"
-- "prepare drift checks and diagnosis for this agent"
+- "set up OTel + Elasticsearch + Kibana for this workspace"
+- "帮我看看 agent 为什么慢 / 为什么报错"
+- "run evaluation / check agent quality"
 
-## Preferred Operating Path
+## Operating Path
 
-Prefer `scripts/bootstrap_observability.py` for the main flow.
+### First-time setup
 
-That path should:
+```
+1. quickstart.py --agent-dir <path> --apply
+   （自动检测框架、生成配置、apply 到 ES/Kibana）
 
-1. validate the workspace
-2. discover likely monitorable modules
-3. render Collector config, env file, launcher, and OTLP HTTP bridge fallback artifacts
-4. render Elasticsearch assets
-5. render Elastic-native starter assets for APM / RUM / profiling when the ingest mode calls for it
-6. optionally generate a Python instrumentation starter file
-7. optionally dry-run or apply Elasticsearch and Kibana assets
-8. optionally generate a smoke report after a real apply
+2. 或者分步走：
+   bootstrap_observability.py --workspace <path> --output-dir <dir> \
+     --es-url <url> --apply-es-assets --kibana-url <url> --apply-kibana-assets
+```
 
-## Product Boundary
+### After bootstrap
 
-Keep the boundary honest.
+```
+3. doctor.py --es-url <url>
+   （确认管线健康，看 instrumentation coverage 缺什么字段）
 
-Current repo capabilities are best described as:
+4. 按 doctor 输出的 fix 补埋点（或让 AI agent 自动补）
 
-- Collector-side integration artifacts (traces + logs + metrics pipelines)
-- OTLP HTTP bridge fallback artifacts for logs/traces when the Collector Elasticsearch exporter is the blocked layer
-- Elasticsearch storage assets (data streams, ECS mappings, component templates, tiered ILM)
-- Kibana data view, saved search, Lens visualizations, and a starter dashboard
-- Elastic-native starter assets for APM traces, Kibana native app entrypoints, trace-analysis playbooks, browser RUM, UX rollout, and profiling notes
-- standalone alert + root-cause analysis script (no Kibana Alerting license needed)
-- alert → insight-store bridge for automatic RCA conclusion archival
-- auto-instrumentation starter snippet for Python agents (monkey-patches OpenAI / Anthropic on import), plus a Node.js / TypeScript preloadable bundle (`@opentelemetry/sdk-node` + HTTP/Undici + `tracedToolCall` / `tracedModelCall` wrappers) for TS-first runtimes such as `openclaw/openclaw`
-- LLM proxy starter bundle (LiteLLM docker-compose) for zero-code observability of upstream OSS agents you do not want to fork; the proxy emits the same `gen_ai.*` span attributes that the rest of this pipeline already understands
-- dry-run planning before touching a live ES / Kibana target
-- configuration drift detection between local assets and live cluster
-- observability maturity scoring with upgrade guidance
-- dashboard extensions via external JSON/YAML panel declarations
-- ECS / GenAI-native ingest contract with no legacy flat-field remap
-- reasoning trace schema (`gen_ai.agent_ext.reasoning.*`) for recording agent decision rationale, alternatives, and confidence at each step; the trace timeline view in Kibana shows decision-by-decision replay
-- lightweight evaluation runner (`evaluate.py`) with 6 built-in regression evaluators (latency, error rate, token efficiency, cost, tool coverage, guardrail block rate); writes `gen_ai.evaluation.*` events to ES so the dashboard panels and alert engine can detect regressions
-- LLM-as-Judge evaluator (`evaluate.py --evaluators llm_judge --llm-judge-endpoint <url>`): samples recent traces from ES, sends to any OpenAI-compatible API for quality scoring; does NOT host the LLM
-- user feedback collection (`gen_ai.feedback.*`): the OTLP HTTP bridge exposes `POST /v1/feedback` to accept thumbs-up/down, numeric scores, and free-text comments linked to specific traces/sessions; two Kibana panels show sentiment distribution and score trend
-- session replay (`replay.py`): reconstructs a nested span tree from ES trace data for a given session or trace ID; outputs text-tree or JSON; includes reasoning trace and feedback at each decision point
-- all features target the Basic (free) Elasticsearch license
+5. alert_and_diagnose.py --es-url <url> --time-range now-15m
+   （告警 + 根因分析）
+```
 
-Do not claim that the repo already:
+### Day-2 operations
 
-- rewires the agent SDK automatically
-- makes arbitrary runtime instrumentation disappear
-- ships a complete Kibana observability suite
-- performs deep semantic parsing of arbitrary telemetry
+| 我想… | 跑 |
+|-------|-----|
+| 检查管线健康 | `doctor.py` |
+| 看告警 + 根因 | `alert_and_diagnose.py` |
+| 看成本分布 | `model_pricing.py summary` |
+| 跑回归评估 | `evaluate.py run` |
+| 回放一个 session | `replay.py --session-id <id>` |
+| 看部署了什么 | `status.py` |
+| 检测配置漂移 | `validate_state.py` |
+| 卸载 | `uninstall.py --confirm` |
 
-## Collector Rule
+统一入口：`cli.py <command>`（init / quickstart / doctor / alert / cost / eval / replay / status / validate / uninstall / scenarios）
 
-The generated Collector config uses contrib-only components such as `spanmetrics` and the Elasticsearch exporter.
-Default the launcher to `otelcol-contrib`, or document the need for an equivalent custom Collector distribution.
-Do not imply that a minimal core `otelcol` binary is enough.
-If OTLP receive is healthy but the Elasticsearch exporter is the blocked layer, the generated OTLP HTTP bridge fallback is the honest short-term escape hatch for logs/traces.
+## Boundary
 
-When launching the Collector from an interactive agent shell, use `run-collector.sh --daemon` (not the bare foreground mode). `--daemon` uses `setsid` + `nohup` + a PID file so the process survives the shell's exit. The default foreground mode is only correct when something else is supervising it (systemd, docker, tmux). Foreground launched from a throwaway shell is how Collectors become `<defunct>` while `/healthz` keeps returning 200.
+**是：** ES 后端的 agent 可观测 data layer — 采集、存储、查询、告警、评估。
 
-## Honesty Rule
+**不是：** 完整可观测平台、agent runtime、prompt management、UI 产品。
 
-Never report "observability is done" based on a single `/healthz` call. The bridge's `/healthz` comes up the moment the HTTP listener binds — it does not prove the Collector is alive, that OTLP ports are listening, or that real data is reaching Elasticsearch. The canonical failure mode in the wild: healthz=200, Collector `<defunct>`, port 4318 refused, ES empty, downstream tasks SIGTERM'd.
+不要声称：
+- 自动重连 agent SDK
+- 完整的 Kibana 可观测套件
+- 深度语义解析任意遥测
 
-When asked "is the pipeline working?", run `doctor.py` and report its verdict. `healthy` is the only status that counts as done. Any other verdict must be reported verbatim, not softened:
+## Key Rules
 
-- `degraded_collector_path` is the specific "bridge ok, Collector dead" state — agents are still shipping data via the fallback, but the standard OTLP receiver is broken. Do not round this up to "done" just because data is flowing.
-- `degraded` / `broken` / `unreachable` mean the pipeline is not trustworthy end-to-end; partial success is worse than visible failure because it lies to every downstream check.
+**Pipeline honesty** — 不要拿 `/healthz` 200 当"管线正常"。用 `doctor.py`，只有 `healthy` 才算。
 
-If the downstream consumer only understands `healthy/degraded/broken/unreachable`, treat `degraded_collector_path` as `degraded` — but never as `healthy`.
+**Credential safety** — 默认 env placeholder，不落盘。只有用户明确要求才 inline。
 
-## Security Rule
+**Reasoning trace PII** — `rationale` 截断 500 字符、`input_summary` 截断 300 字符。ingest pipeline 强制执行，防止 PII 无限落库。
 
-Prefer env-placeholder credentials by default.
-Only embed Elasticsearch credentials into YAML when the operator explicitly asks for it.
-Treat embedded YAML as secret material.
-
-## Reporting Rule
-
-Treat Kibana as the main human-facing surface.
-Treat Markdown / JSON output as smoke or automation output.
-
-Keep the report contract aligned with `report-config.json`, including:
-
-- `events_alias`
-- `time_field`
-- metric names that actually exist in the current implementation
-
-## Discovery Rule
-
-Use workspace discovery as a heuristic helper, not as absolute truth.
-Ignore generated output, docs, references, tests, and asset bundles when scanning for runtime modules.
+**Instrumentation coverage** — doctor 会告诉你缺什么字段。缺 Tier 2 字段不代表管线坏了，代表面板是空的。按 fix 补。
 
 ## Commands
 
-- `cli.py` (unified entry: `agent-obsv <command>`)
-- `bootstrap_observability.py`
-- `quickstart.py` (guided framework-specific setup)
-- `discover_agent_architecture.py`
-- `render_collector_config.py`
-- `render_es_assets.py`
-- `render_elastic_agent_assets.py`
-- `render_instrument_snippet.py` (Python or Node/TS via `--runtime`)
-- `render_llm_proxy_starter.py` (zero-code path for upstream OSS agents)
-- `instrument_frameworks.py` (auto-patch AutoGen, CrewAI, LangGraph, OpenAI Agents SDK)
-- `model_pricing.py` (built-in price table, cost summary, cost backfill)
-- `evaluate.py` (lightweight regression evaluator: latency / error rate / token / cost / tool coverage / guardrail + LLM-as-Judge)
-- `replay.py` (session replay: nested span tree from ES traces with reasoning trace and feedback)
-- `alert_and_diagnose.py` (supports `--alert-rules` JSON config, `--webhook-template slack|dingtalk|feishu|wecom`)
-- `apply_elasticsearch_assets.py`
-- `generate_report.py`
-- `validate_state.py`
-- `verify_pipeline.py` (post-apply canary + ES poll; auto-runs after `--apply-es-assets`)
-- `doctor.py` (honest five-check diagnostic with copy-paste fix commands)
-- `status.py` (reports which assets are currently deployed on the target cluster)
-- `uninstall.py` (dry-run by default; removes only assets that match the prefix)
+核心 5 个：
 
-## Self-Extension Rule
+| 脚本 | 用途 |
+|------|------|
+| `bootstrap_observability.py` | 一键生成全套资产 + 可选 apply |
+| `doctor.py` | 5 项诊断 + 埋点覆盖度检查 |
+| `alert_and_diagnose.py` | 6 种告警 + 根因分析 + 因果链 |
+| `evaluate.py` | 7 个回归评估器（含 LLM-as-Judge） |
+| `replay.py` | session 回放（嵌套 span 树） |
 
-Bootstrap is the first step, not the finish line. After assets are applied:
+辅助：
 
-1. Trust `doctor.py` (and `verify_pipeline.py` under the hood) as the source of truth for "the pipeline works". `doctor.py` checks healthz, process/port state, recent real data in ES, and a live canary — any single one failing downgrades the verdict below `healthy`. `verify_pipeline.py` still auto-runs after `--apply-es-assets`; read its `verdict` in `verify.json`. If `doctor.py` returns anything other than `healthy`, follow the per-check `fix` lines before declaring the setup done.
-2. First-install default: point the agent at the OTLP HTTP bridge (`http://127.0.0.1:14319`). It's the narrower, more reliable path. Graduate to the native Collector ES exporter once the bridge path is stable; re-run verify when you do.
-3. Follow `references/post_bootstrap_playbook.md` in order. Level 0 is verify; each Level 1 item then fills a specific empty Kibana panel.
-4. Only emit fields listed in `references/instrumentation_contract.md` or `references/telemetry_schema.md`. Unknown fields do not feed any panel or alert.
-5. If bootstrap left ES credentials in the YAML (for example when an agent took a shortcut to finish end-to-end), rotate and switch to env / API key per `references/credentials_playbook.md` before declaring the setup "production".
-6. When adding a new field that needs a new panel or alert, update all four touchpoints in one PR: `instrumentation_contract.md`, `telemetry_schema.md`, `render_es_assets.py`, `alert_and_diagnose.py`.
+| 脚本 | 用途 |
+|------|------|
+| `quickstart.py` | 引导式一键设置（自动检测框架） |
+| `model_pricing.py` | 成本查询 / 回填 |
+| `status.py` | 集群资产状态 |
+| `validate_state.py` | 配置漂移检测 |
+| `uninstall.py` | 安全卸载（默认 dry-run） |
+| `instrument_frameworks.py` | 框架自动插桩（AutoGen/CrewAI/LangGraph/OpenAI Agents） |
+
+渲染（通常由 bootstrap 内部调用）：
+
+`render_es_assets.py` / `render_collector_config.py` / `render_otlp_http_bridge.py` / `render_elastic_agent_assets.py` / `render_instrument_snippet.py` / `render_llm_proxy_starter.py`
+
+## Self-Extension
+
+1. `doctor.py` 是 source of truth。verdict 不是 `healthy` → 先修管线。
+2. 首次装机走 bridge（`:14319`）。稳了再升级到 Collector。
+3. 按 `references/post_bootstrap_playbook.md` 的顺序补字段，不要跳。
+4. 只 emit `references/telemetry_schema.md` 里列的字段。
+5. 新字段要同时改 4 个文件：`instrumentation_contract.md`、`telemetry_schema.md`、`render_es_assets.py`、`alert_and_diagnose.py`。
 
 ## References
 
-Read these before changing promises or output shape:
-
-- `references/instrumentation_contract.md` — tiered field contract; which fields power which panel/alert
-- `references/post_bootstrap_playbook.md` — ordered self-extension checklist
-- `references/credentials_playbook.md` — how to move from "it runs" to "it's safe"
-- `references/config_guide.md` — operational contract (bootstrap flags, dry-run, rollout rules)
-- `references/telemetry_schema.md` — full field dictionary
-- `references/architecture.md`
-- `references/reporting.md`
-- `references/runtime_compat.md`
+- `references/instrumentation_contract.md` — 字段分层（Tier 1/2/3）
+- `references/telemetry_schema.md` — 完整字段字典
+- `references/post_bootstrap_playbook.md` — bootstrap 后自检清单
+- `references/config_guide.md` — 操作契约
+- `references/credentials_playbook.md` — 凭证安全

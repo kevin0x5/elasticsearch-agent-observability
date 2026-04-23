@@ -70,7 +70,13 @@ def sanity_check(config: ESConfig, *, index_prefix: str) -> dict[str, Any]:
         if hits < 1:
             return {"status": "failed", "reason": "Sanity check doc not found after indexing", "doc_id": doc_id}
         found_doc = search_result["hits"]["hits"][0]["_source"]
-        pipeline_applied = found_doc.get("observer.product") == "elasticsearch-agent-observability"
+        # observer.product is stored as a nested object by ES ingest set processor.
+        # Check both flat dotted key (old bridge path) and nested (ingest pipeline path).
+        obs_product = (
+            found_doc.get("observer.product")
+            or found_doc.get("observer", {}).get("product")
+        )
+        pipeline_applied = obs_product == "elasticsearch-agent-observability"
         return {
             "status": "passed",
             "doc_id": doc_id,

@@ -175,7 +175,7 @@ class ContractsAndSecurityTests(unittest.TestCase):
         )
         self.assertIn("labels.unmapped", merge_script)
         self.assertIn("known_roots", merge_script)
-        self.assertIn("key.contains('.')", merge_script)
+        self.assertIn("k0.contains('.')", merge_script)
 
     def test_ilm_policy_has_tiered_phases(self) -> None:
         ilm = render_es_assets.build_ilm_policy(30)

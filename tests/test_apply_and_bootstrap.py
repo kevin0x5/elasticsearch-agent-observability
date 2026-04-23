@@ -406,10 +406,14 @@ class ApplyAndBootstrapTests(unittest.TestCase):
         )
         merge_script = merge_processor["source"]
 
-        self.assertIn("void mergeMaps(Map target, Map incoming)", merge_script)
-        self.assertIn("existingValue instanceof Map && incomingValue instanceof Map", merge_script)
-        self.assertIn("mergeMaps(ctx, (Map) ctx._parsed_message)", merge_script)
-        self.assertNotIn("if (!ctx.containsKey(entry.getKey())) ctx[entry.getKey()] = entry.getValue();", merge_script)
+        # Must use inline logic (no user-defined functions — ES 9.x Painless forbids them).
+        self.assertNotIn("void ", merge_script)
+        # Must still have the core flatten + unknown routing behavior.
+        self.assertIn("ctx._parsed_message instanceof Map", merge_script)
+        self.assertIn("labels.unmapped", merge_script)
+        self.assertIn("known_roots", merge_script)
+        # Must flatten nested maps into dotted keys, not preserve nested objects.
+        self.assertIn("k0 + '.' + e1.getKey()", merge_script)
 
 
 if __name__ == "__main__":

@@ -138,6 +138,10 @@ def _ecs_base_properties() -> dict[str, Any]:
         "gen_ai.evaluation.score": {"type": "float"},
         "gen_ai.evaluation.outcome": {"type": "keyword"},  # pass / fail / degraded
         "gen_ai.evaluation.dimension": {"type": "keyword"},  # quality / safety / latency / cost
+        # --- multi-agent correlation ---
+        "gen_ai.agent_ext.parent_agent.id": {"type": "keyword"},
+        "gen_ai.agent_ext.causality.trigger_span_id": {"type": "keyword"},
+        "gen_ai.agent_ext.delegation_target": {"type": "keyword"},
     }
 
 
@@ -236,15 +240,77 @@ def build_ingest_pipeline(modules: list[str]) -> dict[str, Any]:
             {
                 "script": {
                     "lang": "painless",
-                    "source": "def known_roots = new HashSet(['@timestamp', 'message', 'event', 'service', 'agent', 'trace', 'span', 'parent', 'transaction', 'observer', 'host', 'labels', 'gen_ai', 'error', 'log']); void routeUnknown(Map target, String key, def value) { target.labels = target.labels ?: new HashMap(); target.labels.unmapped = target.labels.unmapped ?: new HashMap(); target.labels.unmapped[key] = value; } void mergeMaps(Map target, Map incoming) { for (entry in incoming.entrySet()) { def key = entry.getKey(); def incomingValue = entry.getValue(); if (!(key instanceof String)) { continue; } if (key.contains('.')) { if (!target.containsKey(key) || target[key] == null) { target[key] = incomingValue; } continue; } if (!known_roots.contains(key)) { routeUnknown(target, key, incomingValue); continue; } if (!target.containsKey(key) || target[key] == null) { target[key] = incomingValue; continue; } def existingValue = target[key]; if (existingValue instanceof Map && incomingValue instanceof Map) { mergeMaps((Map) existingValue, (Map) incomingValue); } } } if (ctx._parsed_message instanceof Map) { mergeMaps(ctx, (Map) ctx._parsed_message); } ctx.remove('_parsed_message');",
+                    "source": (
+                        "def known_roots = new HashSet(['@timestamp', 'message', 'event', 'service', "
+                        "'agent', 'trace', 'span', 'parent', 'transaction', 'observer', 'host', "
+                        "'labels', 'gen_ai', 'error', 'log']); "
+                        "if (ctx._parsed_message instanceof Map) { "
+                        "  Map pm = (Map) ctx._parsed_message; "
+                        "  for (def e0 : pm.entrySet()) { "
+                        "    String k0 = e0.getKey().toString(); "
+                        "    def v0 = e0.getValue(); "
+                        "    if (k0.contains('.')) { "
+                        "      if (!ctx.containsKey(k0) || ctx[k0] == null) { ctx[k0] = v0; } "
+                        "      continue; "
+                        "    } "
+                        "    if (!known_roots.contains(k0)) { "
+                        "      ctx.labels = ctx.labels ?: new HashMap(); "
+                        "      ctx.labels.unmapped = ctx.labels.unmapped ?: new HashMap(); "
+                        "      ctx.labels.unmapped[k0] = v0; "
+                        "      continue; "
+                        "    } "
+                        "    if (!(v0 instanceof Map)) { "
+                        "      if (!ctx.containsKey(k0) || ctx[k0] == null) { ctx[k0] = v0; } "
+                        "      continue; "
+                        "    } "
+                        "    Map m0 = (Map) v0; "
+                        "    for (def e1 : m0.entrySet()) { "
+                        "      String dk1 = k0 + '.' + e1.getKey().toString(); "
+                        "      def v1 = e1.getValue(); "
+                        "      if (!(v1 instanceof Map)) { "
+                        "        if (!ctx.containsKey(dk1) || ctx[dk1] == null) { ctx[dk1] = v1; } "
+                        "        continue; "
+                        "      } "
+                        "      Map m1 = (Map) v1; "
+                        "      for (def e2 : m1.entrySet()) { "
+                        "        String dk2 = dk1 + '.' + e2.getKey().toString(); "
+                        "        def v2 = e2.getValue(); "
+                        "        if (!(v2 instanceof Map)) { "
+                        "          if (!ctx.containsKey(dk2) || ctx[dk2] == null) { ctx[dk2] = v2; } "
+                        "          continue; "
+                        "        } "
+                        "        Map m2 = (Map) v2; "
+                        "        for (def e3 : m2.entrySet()) { "
+                        "          String dk3 = dk2 + '.' + e3.getKey().toString(); "
+                        "          if (!ctx.containsKey(dk3) || ctx[dk3] == null) { ctx[dk3] = e3.getValue(); } "
+                        "        } "
+                        "      } "
+                        "    } "
+                        "  } "
+                        "} "
+                        "ctx.remove('_parsed_message');"
+                    ),
                     "ignore_failure": True,
                 }
             },
             # --- redact sensitive GenAI payloads ---
+            # Use both remove (clears nested path) and script (clears flat dotted keys).
+            # After the flatten pass above, sensitive values may live as flat dotted keys.
             {"remove": {"field": "gen_ai.prompt", "ignore_missing": True}},
             {"remove": {"field": "gen_ai.completion", "ignore_missing": True}},
             {"remove": {"field": "gen_ai.tool.call.arguments", "ignore_missing": True}},
             {"remove": {"field": "gen_ai.tool.call.result", "ignore_missing": True}},
+            {
+                "script": {
+                    "lang": "painless",
+                    "source": (
+                        "def sensitive = ['gen_ai.prompt', 'gen_ai.completion', "
+                        "'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result']; "
+                        "for (String f : sensitive) { ctx.remove(f); }"
+                    ),
+                    "ignore_failure": True,
+                }
+            },
         ],
         "on_failure": [
             {"set": {"field": "observer.ingest_error", "value": "{{ _ingest.on_failure_message }}"}}
@@ -592,6 +658,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
     saved_search_id = f"{index_prefix}-event-stream"
     failure_search_id = f"{index_prefix}-event-failures"
     session_search_id = f"{index_prefix}-session-drilldown"
+    trace_timeline_id = f"{index_prefix}-trace-timeline"
     dashboard_id = f"{index_prefix}-overview"
     lens_event_rate_id = f"{index_prefix}-lens-event-rate"
     lens_latency_id = f"{index_prefix}-lens-latency"
@@ -635,6 +702,20 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
             columns=DEFAULT_KIBANA_COLUMNS,
             query="gen_ai.conversation.id:* or gen_ai.agent_ext.turn_id:* or gen_ai.agent.id:*",
         ),
+        build_search_saved_object(
+            object_id=trace_timeline_id,
+            title="Trace timeline",
+            description="Step-by-step replay of a single trace. Filter by trace.id to see the full execution sequence.",
+            data_view_id=data_view_id,
+            columns=[
+                "@timestamp", "event.action", "event.outcome",
+                "gen_ai.tool.name", "gen_ai.request.model",
+                "gen_ai.agent_ext.component_type", "gen_ai.agent_ext.latency_ms",
+                "gen_ai.agent_ext.turn_id", "span.id",
+                "gen_ai.agent_ext.parent_agent.id",
+            ],
+            query="trace.id:*",
+        ),
         _build_lens_event_rate_visualization(object_id=lens_event_rate_id, data_view_id=data_view_id),
         _build_lens_latency_percentiles(object_id=lens_latency_id, data_view_id=data_view_id),
         _build_lens_top_sessions(object_id=lens_top_sessions_id, data_view_id=data_view_id),
@@ -662,6 +743,7 @@ def build_kibana_saved_objects(index_prefix: str, *, extensions: list[dict[str, 
         {"id": lens_top_tools_id, "type": "lens", "width": "24", "height": "12"},
         {"id": lens_token_usage_id, "type": "lens", "width": "24", "height": "12"},
         {"id": session_search_id, "type": "search", "width": "24", "height": "15"},
+        {"id": trace_timeline_id, "type": "search", "width": "24", "height": "15"},
         {"id": saved_search_id, "type": "search", "width": "24", "height": "15"},
         {"id": failure_search_id, "type": "search", "width": "24", "height": "15"},
     ]

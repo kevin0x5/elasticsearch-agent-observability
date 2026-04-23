@@ -154,7 +154,7 @@ def _query_current_window(config: ESConfig, ds_name: str, time_range: str) -> di
                 "aggs": {"token_sum": {"sum": {"field": "gen_ai.usage.input_tokens"}}},
             },
             "top_latency_tools": {
-                "terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE, "order": {"p95": "desc"}},
+                "terms": {"field": "gen_ai.tool.name", "size": TERM_BUCKET_SIZE, "order": {"p95.95": "desc"}},
                 "aggs": {"p95": {"percentiles": {"field": "event.duration", "percents": [95]}}},
             },
             "top_retry_sessions": {

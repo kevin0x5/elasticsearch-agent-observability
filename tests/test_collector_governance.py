@@ -69,6 +69,53 @@ class CollectorGovernanceTests(unittest.TestCase):
         self.assertIn("initial_interval: 1s", rendered)
         self.assertIn("max_interval: 30s", rendered)
 
+    def test_layered_architecture_base_and_governance_are_independent(self) -> None:
+        """The base topology and governance overrides must be independently
+        constructible dicts that _assemble_yaml merges into the final output."""
+        from common import validate_credential_pair, validate_index_prefix
+
+        base = render_collector_config._build_base_topology(
+            discovery=DISCOVERY_SAMPLE,
+            es_url="http://localhost:9200",
+            validated_prefix=validate_index_prefix("agent-obsv"),
+            environment="dev",
+            service_name="agent-runtime",
+            credentials=validate_credential_pair("", ""),
+            embed_credentials=False,
+            grpc_port=4317,
+            http_port=4318,
+            enable_filelog=False,
+            filelog_path="/var/log/agent/*.log",
+        )
+        gov = render_collector_config._build_governance_overrides(
+            sampling_ratio=0.5,
+            send_queue_size=1024,
+            retry_initial_interval="2s",
+            retry_max_interval="60s",
+            telemetry_metrics_port=8888,
+            log_min_severity="",
+        )
+        # Both are plain dicts — no side effects, no YAML yet.
+        self.assertIsInstance(base, dict)
+        self.assertIsInstance(gov, dict)
+        # No key collision between the two layers.
+        self.assertFalse(set(base) & set(gov), "base and governance must not share keys")
+        # Assembling them produces the same output as calling render_config directly.
+        assembled = render_collector_config._assemble_yaml(base, gov)
+        via_public = render_collector_config.render_config(
+            DISCOVERY_SAMPLE,
+            es_url="http://localhost:9200",
+            index_prefix="agent-obsv",
+            environment="dev",
+            service_name="agent-runtime",
+            sampling_ratio=0.5,
+            send_queue_size=1024,
+            retry_initial_interval="2s",
+            retry_max_interval="60s",
+            telemetry_metrics_port=8888,
+        )
+        self.assertEqual(assembled, via_public)
+
 
 if __name__ == "__main__":
     unittest.main()

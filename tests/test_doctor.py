@@ -395,6 +395,30 @@ class RunCollectorScriptTests(unittest.TestCase):
         for token in ["--daemon", "--stop", "--status", "setsid nohup"]:
             self.assertIn(token, bridge_script)
 
+    def test_stop_escalates_to_sigkill_after_timeout(self) -> None:
+        """--stop must SIGTERM first, then escalate to SIGKILL if the process
+        does not exit within the grace window. Prevents zombie accumulation."""
+        script = self._render()
+        self.assertIn("kill -9", script)
+        self.assertIn("SIGKILL", script)
+        # The grace loop must exist (sleep inside a for)
+        self.assertIn("for i in", script)
+
+    def test_bridge_stop_also_escalates(self) -> None:
+        bridge_script = bootstrap_observability.build_bridge_run_script(
+            bridge_path=Path("/tmp/otlphttpbridge.py"),
+            env_path=Path("/tmp/agent-otel-bridge.env"),
+        )
+        self.assertIn("kill -9", bridge_script)
+        self.assertIn("SIGKILL", bridge_script)
+
+    def test_status_cleans_stale_pidfile(self) -> None:
+        """--status must remove a stale PID file pointing at a dead process
+        instead of leaving it around to confuse subsequent --daemon calls."""
+        script = self._render()
+        # The 'not running' branch in --status must rm -f the pidfile
+        self.assertIn('rm -f "$PIDFILE"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

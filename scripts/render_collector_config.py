@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retry-max-interval", default="30s", help="Collector exporter retry max interval")
     parser.add_argument("--enable-filelog", action="store_true", help="Add filelog receiver for local agent log files")
     parser.add_argument("--filelog-path", default="/var/log/agent/*.log")
+    parser.add_argument("--log-min-severity", default="", help="Minimum log severity to keep (e.g. WARN, ERROR). Empty = keep all.")
     return parser.parse_args()
 
 
@@ -69,32 +70,23 @@ def _yaml_scalar(value: str) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
-def render_config(
-    discovery: dict,
+def _build_base_topology(
     *,
+    discovery: dict,
     es_url: str,
-    index_prefix: str,
+    validated_prefix: str,
     environment: str,
     service_name: str,
-    es_user: str = "",
-    es_password: str = "",
-    embed_credentials: bool = False,
-    grpc_port: int = 4317,
-    http_port: int = 4318,
-    telemetry_metrics_port: int = 8888,
-    sampling_ratio: float = 1.0,
-    send_queue_size: int = 2048,
-    retry_initial_interval: str = "1s",
-    retry_max_interval: str = "30s",
-    enable_filelog: bool = False,
-    filelog_path: str = "/var/log/agent/*.log",
-) -> str:
-    validated_prefix = validate_index_prefix(index_prefix)
-    credentials = validate_credential_pair(es_user, es_password)
-    if not 0.0 <= sampling_ratio <= 1.0:
-        raise SkillError(f"Sampling ratio must be between 0.0 and 1.0, got: {sampling_ratio}")
-    if send_queue_size < 1:
-        raise SkillError(f"Send queue size must be >= 1, got: {send_queue_size}")
+    credentials: tuple[str, str] | None,
+    embed_credentials: bool,
+    grpc_port: int,
+    http_port: int,
+    enable_filelog: bool,
+    filelog_path: str,
+) -> dict[str, str]:
+    """Return the structural pieces of the Collector config that define *where*
+    data flows (receivers → processors → exporters). These rarely change across
+    environments."""
     modules = ",".join(module["module_kind"] for module in discovery.get("detected_modules", [])[:12]) or "unknown"
     resource_actions = "\n".join(
         [
@@ -142,6 +134,35 @@ def render_config(
 """
         filelog_receiver_ref = ", filelog"
 
+    spanmetrics_dimensions = "\n".join(
+        f"      - name: {dimension}" for dimension in _normalize_spanmetrics_dimensions()
+    )
+
+    return {
+        "resource_actions": resource_actions,
+        "auth_lines": auth_lines,
+        "events_alias": events_alias,
+        "metrics_index": metrics_index,
+        "filelog_block": filelog_block,
+        "filelog_receiver_ref": filelog_receiver_ref,
+        "spanmetrics_dimensions": spanmetrics_dimensions,
+        "grpc_port": str(grpc_port),
+        "http_port": str(http_port),
+        "es_url": es_url,
+    }
+
+
+def _build_governance_overrides(
+    *,
+    sampling_ratio: float,
+    send_queue_size: int,
+    retry_initial_interval: str,
+    retry_max_interval: str,
+    telemetry_metrics_port: int,
+    log_min_severity: str,
+) -> dict[str, str]:
+    """Return the operational tuning pieces that vary per environment or SLA
+    tier: sampling, queue sizing, retry policy, telemetry port, log severity filter."""
     sampling_block = ""
     sampling_processor_ref = ""
     if 0.0 < sampling_ratio < 1.0:
@@ -150,6 +171,18 @@ def render_config(
     sampling_percentage: {sampling_ratio * 100:.1f}
 """
         sampling_processor_ref = ", probabilistic_sampler"
+
+    severity_filter_block = ""
+    severity_filter_ref = ""
+    if log_min_severity and log_min_severity.upper() != "TRACE":
+        severity_filter_block = f"""
+  filter/log_severity:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'severity_number < SEVERITY_NUMBER_{log_min_severity.upper()}'
+"""
+        severity_filter_ref = ", filter/log_severity"
 
     exporter_resilience_block = f"""
     sending_queue:
@@ -161,23 +194,32 @@ def render_config(
       max_interval: {retry_max_interval}
       max_elapsed_time: 300s"""
 
-    spanmetrics_dimensions = "\n".join(
-        f"      - name: {dimension}" for dimension in _normalize_spanmetrics_dimensions()
-    )
+    return {
+        "sampling_block": sampling_block,
+        "sampling_processor_ref": sampling_processor_ref,
+        "severity_filter_block": severity_filter_block,
+        "severity_filter_ref": severity_filter_ref,
+        "exporter_resilience_block": exporter_resilience_block,
+        "telemetry_metrics_port": str(telemetry_metrics_port),
+    }
 
+
+def _assemble_yaml(base: dict[str, str], gov: dict[str, str]) -> str:
+    """Merge base topology and governance overrides into the final YAML string."""
+    ctx = {**base, **gov}
     return f"""receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: "127.0.0.1:{grpc_port}"
+        endpoint: "127.0.0.1:{ctx['grpc_port']}"
       http:
-        endpoint: "127.0.0.1:{http_port}"
+        endpoint: "127.0.0.1:{ctx['http_port']}"
         # Change to 0.0.0.0 only if external OTLP senders need network access.
-{filelog_block}
+{ctx['filelog_block']}
 connectors:
   spanmetrics:
     dimensions:
-{spanmetrics_dimensions}
+{ctx['spanmetrics_dimensions']}
 
 processors:
   memory_limiter:
@@ -188,7 +230,7 @@ processors:
     timeout: 5s
   resource/runtime:
     attributes:
-{resource_actions}
+{ctx['resource_actions']}
   transform/elastic_mapping:
     error_mode: ignore
     log_statements:
@@ -213,38 +255,90 @@ processors:
         action: delete
       - key: gen_ai.tool.call.result
         action: delete
-{sampling_block}
+{ctx['sampling_block']}{ctx['severity_filter_block']}
 exporters:
   elasticsearch/events:
-    endpoints: [{_yaml_scalar(es_url)}]{auth_lines}
-    logs_index: {_yaml_scalar(events_alias)}
-    traces_index: {_yaml_scalar(events_alias)}
+    endpoints: [{_yaml_scalar(ctx['es_url'])}]{ctx['auth_lines']}
+    logs_index: {_yaml_scalar(ctx['events_alias'])}
+    traces_index: {_yaml_scalar(ctx['events_alias'])}
     mapping:
-      allowed_modes: [ecs]{exporter_resilience_block}
+      allowed_modes: [ecs]{ctx['exporter_resilience_block']}
   elasticsearch/metrics:
-    endpoints: [{_yaml_scalar(es_url)}]{auth_lines}
-    metrics_index: {_yaml_scalar(metrics_index)}
+    endpoints: [{_yaml_scalar(ctx['es_url'])}]{ctx['auth_lines']}
+    metrics_index: {_yaml_scalar(ctx['metrics_index'])}
     mapping:
-      allowed_modes: [ecs]{exporter_resilience_block}
+      allowed_modes: [ecs]{ctx['exporter_resilience_block']}
 
 service:
   telemetry:
     metrics:
-      address: "127.0.0.1:{telemetry_metrics_port}"
+      address: "127.0.0.1:{ctx['telemetry_metrics_port']}"
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resource/runtime, transform/elastic_mapping, attributes/redact{sampling_processor_ref}, batch]
+      processors: [memory_limiter, resource/runtime, transform/elastic_mapping, attributes/redact{ctx['sampling_processor_ref']}, batch]
       exporters: [elasticsearch/events, spanmetrics]
     logs:
-      receivers: [otlp{filelog_receiver_ref}]
-      processors: [memory_limiter, resource/runtime, transform/elastic_mapping, attributes/redact, batch]
+      receivers: [otlp{ctx['filelog_receiver_ref']}]
+      processors: [memory_limiter, resource/runtime, transform/elastic_mapping, attributes/redact{ctx['severity_filter_ref']}, batch]
       exporters: [elasticsearch/events]
     metrics:
       receivers: [otlp, spanmetrics]
       processors: [memory_limiter, resource/runtime, transform/elastic_mapping, batch]
       exporters: [elasticsearch/metrics]
 """
+
+
+def render_config(
+    discovery: dict,
+    *,
+    es_url: str,
+    index_prefix: str,
+    environment: str,
+    service_name: str,
+    es_user: str = "",
+    es_password: str = "",
+    embed_credentials: bool = False,
+    grpc_port: int = 4317,
+    http_port: int = 4318,
+    telemetry_metrics_port: int = 8888,
+    sampling_ratio: float = 1.0,
+    send_queue_size: int = 2048,
+    retry_initial_interval: str = "1s",
+    retry_max_interval: str = "30s",
+    enable_filelog: bool = False,
+    filelog_path: str = "/var/log/agent/*.log",
+    log_min_severity: str = "",
+) -> str:
+    validated_prefix = validate_index_prefix(index_prefix)
+    credentials = validate_credential_pair(es_user, es_password)
+    if not 0.0 <= sampling_ratio <= 1.0:
+        raise SkillError(f"Sampling ratio must be between 0.0 and 1.0, got: {sampling_ratio}")
+    if send_queue_size < 1:
+        raise SkillError(f"Send queue size must be >= 1, got: {send_queue_size}")
+
+    base = _build_base_topology(
+        discovery=discovery,
+        es_url=es_url,
+        validated_prefix=validated_prefix,
+        environment=environment,
+        service_name=service_name,
+        credentials=credentials,
+        embed_credentials=embed_credentials,
+        grpc_port=grpc_port,
+        http_port=http_port,
+        enable_filelog=enable_filelog,
+        filelog_path=filelog_path,
+    )
+    gov = _build_governance_overrides(
+        sampling_ratio=sampling_ratio,
+        send_queue_size=send_queue_size,
+        retry_initial_interval=retry_initial_interval,
+        retry_max_interval=retry_max_interval,
+        telemetry_metrics_port=telemetry_metrics_port,
+        log_min_severity=log_min_severity,
+    )
+    return _assemble_yaml(base, gov)
 
 
 def main() -> int:
@@ -270,6 +364,7 @@ def main() -> int:
             retry_max_interval=args.retry_max_interval,
             enable_filelog=args.enable_filelog,
             filelog_path=args.filelog_path,
+            log_min_severity=args.log_min_severity,
         )
         write_text(output, rendered)
         print(f"✅ collector config written: {output}")

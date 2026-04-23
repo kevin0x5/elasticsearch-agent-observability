@@ -1,47 +1,59 @@
 # elasticsearch-agent-observability
 
-Elasticsearch backend for AI agent observability. One bootstrap gives you ES storage, Kibana dashboards, and automated RCA alerting.
+Elasticsearch backend for AI agent observability. One bootstrap → ES storage + Kibana dashboards + RCA alerting + regression evaluation.
 
-Schema follows [OTel GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). Plug in [OpenLLMetry](https://github.com/traceloop/openllmetry) or any OTel instrumentation SDK — data lands in ES, dashboards light up.
+Schema follows [OTel GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). Plug in [OpenLLMetry](https://github.com/traceloop/openllmetry) or any OTel SDK — data lands in ES, dashboards light up.
+
+**Python 3.10+, stdlib only, Basic (free) ES license.**
+
+## Quick start
+
+```bash
+git clone https://github.com/kevin0x5/elasticsearch-agent-observability.git
+cd elasticsearch-agent-observability
+
+python scripts/cli.py quickstart \
+  --agent-dir /path/to/your/agent \
+  --es-url http://localhost:9200 --es-user elastic --es-password '<pwd>' \
+  --apply --kibana-url http://localhost:5601
+```
+
+Agent side:
+
+```python
+from traceloop.sdk import Traceloop
+Traceloop.init()
+```
+
+Done. Data flows into ES, Kibana dashboards are live.
+
+Then check pipeline health:
+
+```bash
+python scripts/cli.py doctor --es-url http://localhost:9200
+```
 
 ## What you get
-
-**One command, full ES stack:**
 
 ```
 bootstrap_observability.py
  → index template + component templates + ILM (hot/warm/cold/delete)
- → ingest pipeline (OTel→ECS normalization, event.outcome derivation, sensitive field redaction)
- → Kibana dashboard (latency P50/P95, token usage, tool/model/session breakdown, failure hotspots)
- → OTel Collector config (spanmetrics + ES exporter)
- → OTLP HTTP bridge fallback path
+ → ingest pipeline (OTel→ECS normalization, sensitive field redaction)
+ → 22 Kibana panels (latency, tokens, cost, tools, sessions, guardrail, eval, feedback, reasoning)
+ → OTel Collector config + OTLP HTTP bridge fallback
 ```
 
-**6 RCA alert analyzers:**
-
-| Analyzer | Detects |
-|----------|---------|
-| `error_rate_spike` | error rate jump — pinpoints the tool / model / session |
-| `token_consumption_anomaly` | token burn anomaly — finds the top-spending session and tool |
-| `latency_degradation` | P95 latency regression — locates the slowest turn |
-| `session_failure_hotspot` | failures concentrated in a few sessions |
-| `retry_storm` | retry loop — finds the tool stuck in a cycle |
-| `long_turn_hotspot` | single turn stuck — locates the blocking component |
-
-When multiple alerts fire in the same window, they're merged into causal chains (`correlation.chains`) with confidence scores.
-
-**Pipeline health diagnostic (`doctor.py`):**
-
-Refuses to let `/healthz` lie. 5 independent checks — healthz, process/port state (with zombie detection), real ES data, OTLP canary — collapsed into one honest verdict:
-
-- `healthy` — all clear
-- `degraded_collector_path` — bridge fallback is saving you, Collector is down
-- `broken` — data plane is dead (healthz may still say 200)
-- `unreachable` — ES itself is down
-
-**Zero-code ingestion path:**
-
-Don't want to touch agent code? Generate an LLM proxy bundle (LiteLLM docker-compose), point the agent's `OPENAI_API_BASE` at it. Done.
+| Capability | What |
+|------------|------|
+| **Alerting** | 6 RCA analyzers (error spike, token anomaly, latency regression, session hotspot, retry storm, slow turn) with causal chain merging |
+| **Evaluation** | 7 regression evaluators + LLM-as-Judge, writes `gen_ai.evaluation.*` to ES |
+| **Cost tracking** | Built-in price table (30+ models), cost summary, cost backfill |
+| **User feedback** | `POST /v1/feedback` on the bridge, sentiment + score trend panels |
+| **Reasoning trace** | Records why the agent chose each action (rationale, alternatives, confidence) |
+| **Session replay** | Nested span tree with decision trail + feedback at each step |
+| **Pipeline diagnostic** | 5 independent checks, refuses to let `/healthz` lie |
+| **Framework support** | Auto-detect + instrument AutoGen, CrewAI, LangGraph, OpenAI Agents, LlamaIndex, OpenClaw, Mastra |
+| **Instrumentation coverage** | Doctor tells you which fields are missing + exact fix snippets |
 
 ## Data flow
 
@@ -57,205 +69,55 @@ OTel Collector ──→ ES index template + ingest pipeline ──→ Kibana
   └── OTLP HTTP bridge (fallback) ─────────────────────────────┘
 ```
 
-## Schema
-
-OTel GenAI Semantic Conventions v1.40+ standard fields are used directly. Extension fields live under `gen_ai.agent_ext.*`:
-
-| Field | Source |
-|-------|--------|
-| `gen_ai.request.model` | OTel standard |
-| `gen_ai.tool.name` | OTel standard |
-| `gen_ai.conversation.id` | OTel standard |
-| `gen_ai.operation.name` | OTel standard |
-| `gen_ai.usage.input_tokens` / `.output_tokens` | OTel standard |
-| `error.type` | OTel/ECS standard |
-| `gen_ai.agent_ext.turn_id` | extension (OTel proposal pending) |
-| `gen_ai.agent_ext.component_type` | extension |
-| `gen_ai.agent_ext.cost` | extension |
-| `gen_ai.agent_ext.retry_count` | extension |
-| `gen_ai.agent_ext.reasoning.*` | extension — decision trace (action, rationale, alternatives, confidence) |
-| `gen_ai.evaluation.*` | extension — eval results (evaluator, score, outcome, dimension) |
-| `gen_ai.feedback.*` | extension — user feedback (score, sentiment, comment) |
-| `gen_ai.guardrail.*` | extension — safety checks (action, category, rule_id) |
-
-Full dictionary: [`references/telemetry_schema.md`](references/telemetry_schema.md).
-
-## Quick start
-
-```bash
-git clone https://github.com/kevin0x5/elasticsearch-agent-observability.git
-cd elasticsearch-agent-observability
-
-# Unified CLI (recommended)
-python scripts/cli.py quickstart --agent-dir /path/to/your/agent \
-  --es-url http://localhost:9200 --es-user elastic --es-password '<pwd>' \
-  --apply --kibana-url http://localhost:5601
-
-# Or the full bootstrap with all options
-python scripts/bootstrap_observability.py \
-  --workspace /path/to/your/agent \
-  --output-dir generated/bootstrap \
-  --es-url http://localhost:9200 \
-  --es-user elastic --es-password '<pwd>' \
-  --apply-es-assets \
-  --kibana-url http://localhost:5601 \
-  --apply-kibana-assets
-```
-
-Hook up OpenLLMetry on the agent side:
-
-```python
-from traceloop.sdk import Traceloop
-Traceloop.init()
-```
-
-Data flows into ES, Kibana dashboards are live.
-
-## Unified CLI
+## CLI
 
 ```bash
 python scripts/cli.py <command> [options]
-
-# Available commands:
-#   init        Bootstrap the full observability stack
-#   quickstart  Guided one-command setup (auto-detects framework)
-#   status      Report what assets are deployed on the cluster
-#   doctor      Honest end-to-end pipeline diagnostic
-#   alert       Alert check with intelligent root-cause analysis
-#   cost        Model pricing, cost summary, and cost backfill
-#   eval        Run regression evaluators (+ LLM-as-Judge) against recent traces
-#   replay      Session replay — nested span tree with reasoning trace
-#   query       Pre-built ES query templates
-#   report      Generate a smoke/metrics report
-#   validate    Configuration drift detection
-#   uninstall   Remove all managed assets from the cluster
-#   scenarios   Show "I want to do X → run Y" cheat sheet
 ```
 
-## Framework support
+| Command | What |
+|---------|------|
+| `init` | Bootstrap the full stack |
+| `quickstart` | Guided setup (auto-detects framework) |
+| `doctor` | Pipeline diagnostic + instrumentation coverage |
+| `alert` | Alert + RCA (`--webhook-template slack\|dingtalk\|feishu\|wecom`) |
+| `eval` | Run evaluators (`--evaluators llm_judge --llm-judge-endpoint <url>`) |
+| `replay` | Session replay (`--session-id <id>` or `--trace-id <id>`) |
+| `cost` | Cost summary / enrich / prices |
+| `status` | What's deployed on the cluster |
+| `validate` | Config drift detection |
+| `uninstall` | Remove all managed assets |
+| `scenarios` | "I want to do X → run Y" cheat sheet |
 
-Auto-detected and instrumented via `quickstart` or `instrument_frameworks.py`:
+## Schema
 
-| Framework | Runtime | Auto-detect | Zero-code path |
-|-----------|---------|-------------|----------------|
-| AutoGen | Python | ✓ | traceloop-sdk |
-| CrewAI | Python | ✓ | traceloop-sdk |
-| LangGraph / LangChain | Python | ✓ | traceloop-sdk |
-| OpenAI Agents SDK | Python | ✓ | auto-patch |
-| LlamaIndex | Python | ✓ | traceloop-sdk |
-| OpenClaw | Node.js | ✓ | LLM proxy |
-| Mastra | Node.js | ✓ | Node bootstrap |
+80+ fields across OTel GenAI standard, ECS, and project extensions. Key namespaces:
 
-## Evaluation & quality signals
+| Namespace | Examples |
+|-----------|----------|
+| OTel standard | `gen_ai.request.model`, `gen_ai.tool.name`, `gen_ai.usage.*`, `gen_ai.conversation.id` |
+| ECS standard | `@timestamp`, `event.*`, `service.*`, `trace.id`, `span.id` |
+| Agent extensions | `gen_ai.agent_ext.reasoning.*`, `gen_ai.agent_ext.cost`, `gen_ai.agent_ext.turn_id` |
+| Evaluation | `gen_ai.evaluation.score`, `gen_ai.evaluation.outcome`, `gen_ai.evaluation.dimension` |
+| Feedback | `gen_ai.feedback.score`, `gen_ai.feedback.sentiment`, `gen_ai.feedback.comment` |
+| Guardrail | `gen_ai.guardrail.action`, `gen_ai.guardrail.category` |
 
-**7 regression evaluators** (`agent-obsv eval run`):
-
-| Evaluator | Dimension | What it checks |
-|-----------|-----------|----------------|
-| `latency_regression` | latency | P95 latency vs baseline |
-| `error_rate_regression` | quality | Error rate vs baseline |
-| `token_efficiency` | cost | Tokens per session vs baseline |
-| `cost_regression` | cost | USD cost per session vs baseline |
-| `tool_coverage` | quality | Fraction of known tools actually called |
-| `guardrail_block_rate` | safety | Guardrail block/redact rate |
-| `llm_judge` | quality | LLM-as-Judge via any OpenAI-compatible API |
-
-```bash
-# Rule-based evaluation
-agent-obsv eval run --es-url <url> --write-to-es
-
-# LLM-as-Judge (bring your own endpoint)
-agent-obsv eval run --es-url <url> --evaluators llm_judge \
-  --llm-judge-endpoint http://localhost:4000 --llm-judge-model gpt-4o-mini
-```
-
-**User feedback** — the OTLP HTTP bridge exposes `POST /v1/feedback`:
-
-```bash
-curl -X POST http://127.0.0.1:14319/v1/feedback \
-  -H 'Content-Type: application/json' \
-  -d '{"score": 1, "comment": "helpful", "trace_id": "abc", "session_id": "sess-1"}'
-```
-
-Feedback lands in the same data stream; Kibana shows sentiment distribution and score trend.
-
-## Session replay
-
-Reconstruct a nested span tree with reasoning trace and user feedback:
-
-```bash
-agent-obsv replay --es-url <url> --session-id <id>
-agent-obsv replay --es-url <url> --trace-id <id> --format json
-```
-
-Output includes decision rationale at each step:
-```
-✓ [10:00:00Z] agent.run (runtime) 1200ms
-  💭 decided=tool_call type=tool_selection conf=0.9 rejected=[web_search]
-  📝 DB has the data the user needs
-  ✓ [10:00:01Z] tool.query_db (tool) tool=query_db 800ms
-  👤 score=1 sentiment=positive
-```
-
-## Reasoning trace
-
-Record WHY the agent chose each action — not just what it did:
-
-```python
-from instrument_frameworks import traced_decision, emit_reasoning_span
-
-@traced_decision(action="tool_call", decision_type="tool_selection",
-                 rationale="User asked about weather", alternatives="web_search,cached")
-def call_weather_api(city): ...
-
-# Or standalone:
-emit_reasoning_span(action="delegate", decision_type="delegation",
-                    rationale="Task requires code expertise", confidence=0.85)
-```
-
-Fields: `gen_ai.agent_ext.reasoning.action`, `.alternatives`, `.rationale`, `.confidence`, `.decision_type`, `.step_index`.
-
-## Commands
-
-```bash
-# Pipeline health (don't trust /healthz)
-agent-obsv doctor --es-url <url>
-
-# Alert + RCA (supports Slack/钉钉/飞书/企微 webhook templates)
-agent-obsv alert --es-url <url> --time-range now-15m
-agent-obsv alert --es-url <url> --alert-rules rules.json --webhook-url <url> --webhook-template slack
-
-# Cost analysis (built-in price table: 30+ models)
-agent-obsv cost summary --es-url <url>
-agent-obsv cost enrich --es-url <url> --time-range now-7d
-agent-obsv cost prices
-
-# Evaluation
-agent-obsv eval run --es-url <url> --write-to-es
-agent-obsv eval list
-
-# Session replay
-agent-obsv replay --es-url <url> --session-id <id>
-
-# Other
-agent-obsv status --es-url <url>
-agent-obsv validate --es-url <url> --assets-dir generated/bootstrap/elasticsearch
-agent-obsv uninstall --es-url <url> --confirm
-```
+Full dictionary: [`references/telemetry_schema.md`](references/telemetry_schema.md). Field tiers: [`references/instrumentation_contract.md`](references/instrumentation_contract.md).
 
 ## Requirements
 
-- Python 3.10+ (stdlib only)
+- Python 3.10+ (stdlib only, zero third-party deps)
 - Elasticsearch 8.x / 9.x + Kibana (Basic license)
 - `otelcol-contrib` 0.87.0+ for the Collector path
 - Any OTel GenAI instrumentation SDK (OpenLLMetry recommended)
 
 ## References
 
-- [`references/instrumentation_contract.md`](references/instrumentation_contract.md) — field tiers
+- [`references/instrumentation_contract.md`](references/instrumentation_contract.md) — field tiers (Tier 1/2/3)
 - [`references/telemetry_schema.md`](references/telemetry_schema.md) — full field dictionary
 - [`references/post_bootstrap_playbook.md`](references/post_bootstrap_playbook.md) — post-bootstrap checklist
 - [`references/config_guide.md`](references/config_guide.md) — operational contract
+- [`references/credentials_playbook.md`](references/credentials_playbook.md) — credential security
 
 ## License
 
